@@ -1,0 +1,236 @@
+html,
+body,
+#app,
+.app-root {
+  height: 100%;
+  margin: 0;
+  background: #fff;
+  overflow: hidden;
+}
+
+canvas {
+  display: block;
+  width: 100vw;
+  height: 100vh;
+}
+
+#menuBar {
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  padding: 7px 12px;
+  background: rgba(255, 255, 255, 0.94);
+  border-bottom: 1px solid #dcdcdc;
+  box-shadow: 0 3px 10px rgba(0, 0, 0, 0.08);
+  backdrop-filter: blur(8px);
+  font: 12px/1.2 system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif;
+  user-select: none;
+  z-index: 20;
+}
+
+#menuBar .menu-root {
+  position: relative;
+}
+
+#menuBar .menu-trigger {
+  padding: 6px 10px;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: #131313;
+  min-width: 52px;
+  text-align: center;
+  cursor: default;
+}
+
+#menuBar .menu-root:hover .menu-trigger,
+#menuBar .menu-root.open .menu-trigger {
+  background: #efefef;
+}
+
+#menuBar .menu-panel {
+  position: absolute;
+  top: calc(100% + 6px);
+  left: 0;
+  min-width: 244px;
+  display: none;
+  flex-direction: column;
+  gap: 2px;
+  padding: 6px;
+  box-sizing: border-box;
+  overflow: hidden;
+  border: 1px solid #d5d5d5;
+  border-radius: 8px;
+  background: #fff;
+  box-shadow: 0 14px 28px rgba(0, 0, 0, 0.11);
+}
+
+#menuBar .menu-root.open .menu-panel {
+  display: flex;
+}
+
+#menuBar .menu-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  box-sizing: border-box;
+  padding: 7px 8px;
+  border-radius: 7px;
+  color: #111;
+  cursor: default;
+  white-space: nowrap;
+}
+
+#menuBar .menu-item:hover,
+#menuBar .menu-item.hover {
+  background: #111;
+  color: #fff;
+}
+
+#menuBar .menu-item:hover .menu-icon,
+#menuBar .menu-item.hover .menu-icon {
+  filter: brightness(0) invert(1);
+}
+
+#menuBar .menu-item.disabled {
+  opacity: 0.45;
+  pointer-events: none;
+}
+
+#menuBar .menu-item.danger {
+  color: #8a1414;
+}
+
+#menuBar .menu-item:hover.danger,
+#menuBar .menu-item.hover.danger {
+  color: #fff;
+}
+
+#menuBar .menu-checkmark {
+  width: 12px;
+  flex: 0 0 12px;
+  opacity: 0;
+  text-align: center;
+  font-size: 12px;
+  line-height: 1;
+}
+
+#menuBar .menu-item.selected .menu-checkmark {
+  opacity: 1;
+}
+
+#menuBar .menu-checkmark.blank {
+  opacity: 0;
+}
+
+#menuBar .menu-icon,
+#menuBar .menu-icon-slot {
+  width: 15px;
+  height: 15px;
+  flex: 0 0 15px;
+}
+
+#menuBar .menu-label {
+  flex: 0 1 auto;
+}
+
+#menuBar .menu-hotkey {
+  margin-left: auto;
+  color: #757575;
+  font-size: 11px;
+  letter-spacing: 0.04em;
+}
+
+#menuBar .menu-item:hover .menu-hotkey,
+#menuBar .menu-item.hover .menu-hotkey {
+  color: #fff;
+}
+
+#menuBar .menu-sep {
+  margin: 4px 2px;
+  border: 0;
+  border-top: 1px solid #e7e7e7;
+}
+
+#menuBar .grid-panel {
+  min-width: 180px;
+}
+
+#menuBar .menu-section-label {
+  padding: 3px 8px 4px 36px;
+  color: #666;
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+
+#toolPalette {
+  position: fixed;
+  top: 52px;
+  left: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 7px;
+  border: 1px solid #d7d7d7;
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.92);
+  backdrop-filter: blur(8px);
+  box-shadow: 0 9px 22px rgba(0, 0, 0, 0.12);
+  z-index: 15;
+}
+
+#toolPalette.hidden {
+  display: none;
+}
+
+#toolPalette .palette-btn {
+  width: 30px;
+  height: 30px;
+  padding: 0;
+  display: grid;
+  place-items: center;
+  border: 1px solid #cbcbcb;
+  border-radius: 7px;
+  background: #fff;
+  cursor: pointer;
+}
+
+#toolPalette .palette-btn .menu-icon {
+  width: 15px;
+  height: 15px;
+}
+
+#toolPalette .palette-btn:hover {
+  background: #f3f3f3;
+}
+
+#toolPalette .palette-btn:active {
+  transform: translateY(1px);
+}
+
+#toolPalette .palette-btn.selected {
+  background: #111;
+  border-color: #111;
+}
+
+#toolPalette .palette-btn.selected .menu-icon {
+  filter: brightness(0) invert(1);
+}
+
+#toolPalette .palette-btn:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+#toolPalette .palette-sep {
+  width: 100%;
+  height: 1px;
+  background: #e8e8e8;
+  margin: 3px 0;
+}
