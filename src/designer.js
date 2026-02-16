@@ -140,6 +140,7 @@ export function mountDesigner(root) {
 
     ink: [],
     fills: [],
+    nextInkId: 1,
     inkRevision: 0,
     geomRevision: 0,
 
@@ -186,7 +187,37 @@ export function mountDesigner(root) {
     return state.shapeDesigns[shape];
   }
 
+  function isValidInkId(id) {
+    return Number.isInteger(id) && id > 0;
+  }
+
+  function ensureDesignInkIds(design) {
+    if (!design) return;
+    for (const ink of design.ink) {
+      if (isValidInkId(ink.id)) {
+        if (ink.id >= state.nextInkId) state.nextInkId = ink.id + 1;
+        continue;
+      }
+      ink.id = state.nextInkId;
+      state.nextInkId += 1;
+    }
+  }
+
+  function ensureAllInkIds() {
+    for (const shape of SHAPES) {
+      ensureDesignInkIds(getShapeDesign(shape));
+    }
+  }
+
+  function createInk(ink) {
+    return {
+      id: state.nextInkId++,
+      ...ink,
+    };
+  }
+
   function syncActiveDesignRefs() {
+    ensureAllInkIds();
     const design = getShapeDesign(state.tileShape);
     if (!design) return;
     state.ink = design.ink;
@@ -194,7 +225,10 @@ export function mountDesigner(root) {
   }
 
   function cloneFill(f) {
-    return { x: f.x, y: f.y };
+    const out = { x: f.x, y: f.y };
+    if (Array.isArray(f.boundaryInkIds)) out.boundaryInkIds = [...f.boundaryInkIds];
+    if (f.usesTileBoundary) out.usesTileBoundary = true;
+    return out;
   }
 
   function cloneDesign(design) {
@@ -566,11 +600,198 @@ export function mountDesigner(root) {
     ctx.restore();
   }
 
-  function computeFillMaskAtSeed(seedWorld, tile = state.tri, design = { ink: state.ink, fills: state.fills }) {
+  const TILE_BOUNDARY_CODE = 1;
+  const INK_CODE_OFFSET = 2;
+
+  function fillBoundaryInkList(design, boundaryInkIds = null) {
+    if (!Array.isArray(boundaryInkIds)) return design.ink;
+    if (!boundaryInkIds.length) return [];
+    const ids = new Set(boundaryInkIds);
+    return design.ink.filter((ink) => ids.has(ink.id));
+  }
+
+  function drawLocalInkStroke(g, localInk, toPix, scale) {
+    if (localInk.type === "line") {
+      const a = toPix(localInk.a);
+      const b = toPix(localInk.b);
+      g.beginPath();
+      g.moveTo(a.x, a.y);
+      g.lineTo(b.x, b.y);
+      g.stroke();
+      return;
+    }
+    if (localInk.type === "circle") {
+      const c = toPix(localInk.c);
+      g.beginPath();
+      g.arc(c.x, c.y, localInk.r * scale, 0, TAU);
+      g.stroke();
+      return;
+    }
+    if (localInk.type === "arc") {
+      const c = toPix(localInk.c);
+      g.beginPath();
+      g.arc(c.x, c.y, localInk.r * scale, localInk.a0, localInk.a1, false);
+      g.stroke();
+    }
+  }
+
+  function colorForCode(code) {
+    const r = code & 255;
+    const g = (code >>> 8) & 255;
+    const b = (code >>> 16) & 255;
+    return `rgb(${r}, ${g}, ${b})`;
+  }
+
+  function codeForInkId(inkId) {
+    return INK_CODE_OFFSET + Math.max(0, inkId | 0);
+  }
+
+  function inkIdFromCode(code) {
+    return code - INK_CODE_OFFSET;
+  }
+
+  function discoverFillBoundaryDefinition(seedWorld, tile = state.tri, design = { ink: state.ink, fills: state.fills }) {
+    if (!tile || !design) return null;
+    ensureDesignInkIds(design);
+    const allIds = design.ink
+      .map((ink) => ink.id)
+      .filter((id) => isValidInkId(id));
+
+    const full = computeFillMaskAtSeed(seedWorld, tile, design, allIds);
+    if (!full) return null;
+
+    const boundaryInkIds = [];
+    for (const id of allIds) {
+      const without = allIds.filter((candidate) => candidate !== id);
+      const candidateData = computeFillMaskAtSeed(seedWorld, tile, design, without);
+      if (!candidateData || candidateData.sig !== full.sig) {
+        boundaryInkIds.push(id);
+      }
+    }
+
+    const boundaryData = computeFillMaskAtSeed(seedWorld, tile, design, boundaryInkIds);
+    if (!boundaryData) return null;
+    return {
+      boundaryInkIds,
+      usesTileBoundary: !!boundaryData.usesTileBoundary,
+      data: boundaryData,
+    };
+  }
+
+  function includeInkBounds(bounds, localInk) {
+    if (localInk.type === "line") {
+      bounds.minX = Math.min(bounds.minX, localInk.a.x, localInk.b.x);
+      bounds.minY = Math.min(bounds.minY, localInk.a.y, localInk.b.y);
+      bounds.maxX = Math.max(bounds.maxX, localInk.a.x, localInk.b.x);
+      bounds.maxY = Math.max(bounds.maxY, localInk.a.y, localInk.b.y);
+      return;
+    }
+    if (localInk.type === "circle" || localInk.type === "arc") {
+      bounds.minX = Math.min(bounds.minX, localInk.c.x - localInk.r);
+      bounds.minY = Math.min(bounds.minY, localInk.c.y - localInk.r);
+      bounds.maxX = Math.max(bounds.maxX, localInk.c.x + localInk.r);
+      bounds.maxY = Math.max(bounds.maxY, localInk.c.y + localInk.r);
+    }
+  }
+
+  function isSeedClosedByBoundaryInk(seedLocal, tile, boundaryInk) {
+    if (!boundaryInk.length) return false;
+    const bounds = {
+      minX: seedLocal.x,
+      minY: seedLocal.y,
+      maxX: seedLocal.x,
+      maxY: seedLocal.y,
+    };
+    const localInk = boundaryInk.map((ink) => inkWorldToLocal(ink, tile));
+    for (const ink of localInk) includeInkBounds(bounds, ink);
+
+    const margin = 18 * state.dpr;
+    bounds.minX -= margin;
+    bounds.minY -= margin;
+    bounds.maxX += margin;
+    bounds.maxY += margin;
+    const wLocal = Math.max(1, bounds.maxX - bounds.minX);
+    const hLocal = Math.max(1, bounds.maxY - bounds.minY);
+
+    const target = 700;
+    let s = Math.min(target / wLocal, target / hLocal);
+    s = clamp(s, 1.0, 3.2);
+
+    const w = Math.max(1, Math.ceil(wLocal * s));
+    const h = Math.max(1, Math.ceil(hLocal * s));
+    const off = document.createElement("canvas");
+    off.width = w;
+    off.height = h;
+    const g = off.getContext("2d");
+
+    const toPix = (p) => v((p.x - bounds.minX) * s, (p.y - bounds.minY) * s);
+    const seedPix = toPix(seedLocal);
+
+    g.fillStyle = "#fff";
+    g.fillRect(0, 0, w, h);
+    g.strokeStyle = "#000";
+    g.lineJoin = "round";
+    g.lineCap = "round";
+    g.lineWidth = 1.15;
+    for (const ink of localInk) drawLocalInkStroke(g, ink, toPix, s);
+
+    const img = g.getImageData(0, 0, w, h).data;
+    const idx = (x, y) => (y * w + x) * 4;
+    const isWall = (x, y) => {
+      const i = idx(x, y);
+      return img[i] < 170 || img[i + 1] < 170 || img[i + 2] < 170;
+    };
+
+    const sx = Math.floor(seedPix.x);
+    const sy = Math.floor(seedPix.y);
+    if (sx < 0 || sy < 0 || sx >= w || sy >= h) return false;
+    if (isWall(sx, sy)) return false;
+
+    const visited = new Uint8Array(w * h);
+    const qx = new Int32Array(w * h);
+    const qy = new Int32Array(w * h);
+    let qh = 0;
+    let qt = 0;
+    const push = (x, y) => {
+      const vi = y * w + x;
+      visited[vi] = 1;
+      qx[qt] = x;
+      qy[qt] = y;
+      qt += 1;
+    };
+    push(sx, sy);
+
+    while (qh < qt) {
+      const x = qx[qh];
+      const y = qy[qh];
+      qh += 1;
+      if (x === 0 || y === 0 || x === w - 1 || y === h - 1) return false;
+      const n = [[1, 0], [-1, 0], [0, 1], [0, -1]];
+      for (let k = 0; k < 4; k += 1) {
+        const nx = x + n[k][0];
+        const ny = y + n[k][1];
+        if (nx < 0 || ny < 0 || nx >= w || ny >= h) continue;
+        const vi = ny * w + nx;
+        if (visited[vi]) continue;
+        if (isWall(nx, ny)) continue;
+        push(nx, ny);
+      }
+    }
+
+    return true;
+  }
+
+  function computeFillMaskAtSeed(
+    seedWorld,
+    tile = state.tri,
+    design = { ink: state.ink, fills: state.fills },
+    boundaryInkIds = null
+  ) {
     if (!tile) return null;
     const seedLocal = pointWorldToLocal(seedWorld, tile);
     if (!pointInTile(seedLocal, tile)) return null;
 
+    const boundaryInk = fillBoundaryInkList(design, boundaryInkIds);
     const verts = tile.polyLocal;
     let minX = Infinity;
     let minY = Infinity;
@@ -590,64 +811,63 @@ export function mountDesigner(root) {
 
     const wLocal = maxX - minX;
     const hLocal = maxY - minY;
-
     const target = 900;
     let s = Math.min(target / Math.max(1, wLocal), target / Math.max(1, hLocal));
     s = clamp(s, 1.0, 3.2);
 
     const w = Math.max(1, Math.ceil(wLocal * s));
     const h = Math.max(1, Math.ceil(hLocal * s));
-
     const off = document.createElement("canvas");
     off.width = w;
     off.height = h;
     const g = off.getContext("2d");
 
+    const offCodes = document.createElement("canvas");
+    offCodes.width = w;
+    offCodes.height = h;
+    const cg = offCodes.getContext("2d");
+
     const toPix = (p) => v((p.x - minX) * s, (p.y - minY) * s);
     const seedPix = toPix(seedLocal);
+    const strokeTilePoly = (targetCtx) => {
+      targetCtx.beginPath();
+      targetCtx.moveTo(toPix(verts[0]).x, toPix(verts[0]).y);
+      for (let i = 1; i < verts.length; i += 1) {
+        const pp = toPix(verts[i]);
+        targetCtx.lineTo(pp.x, pp.y);
+      }
+      targetCtx.closePath();
+      targetCtx.stroke();
+    };
 
     g.clearRect(0, 0, w, h);
     g.fillStyle = "#fff";
     g.fillRect(0, 0, w, h);
-
     g.strokeStyle = "#000";
     g.lineJoin = "round";
     g.lineCap = "round";
     g.lineWidth = 1.15;
+    strokeTilePoly(g);
 
-    g.beginPath();
-    g.moveTo(toPix(verts[0]).x, toPix(verts[0]).y);
-    for (let i = 1; i < verts.length; i += 1) {
-      const pp = toPix(verts[i]);
-      g.lineTo(pp.x, pp.y);
-    }
-    g.closePath();
-    g.stroke();
+    cg.clearRect(0, 0, w, h);
+    cg.fillStyle = "#000";
+    cg.fillRect(0, 0, w, h);
+    cg.lineJoin = "round";
+    cg.lineCap = "round";
+    cg.lineWidth = 1.15;
+    cg.strokeStyle = colorForCode(TILE_BOUNDARY_CODE);
+    strokeTilePoly(cg);
 
-    for (const o of design.ink) {
-      const localInk = inkWorldToLocal(o, tile);
-      if (localInk.type === "line") {
-        const a = toPix(localInk.a);
-        const b = toPix(localInk.b);
-        g.beginPath();
-        g.moveTo(a.x, a.y);
-        g.lineTo(b.x, b.y);
-        g.stroke();
-      } else if (localInk.type === "circle") {
-        const c = toPix(localInk.c);
-        g.beginPath();
-        g.arc(c.x, c.y, localInk.r * s, 0, TAU);
-        g.stroke();
-      } else if (localInk.type === "arc") {
-        const c = toPix(localInk.c);
-        g.beginPath();
-        g.arc(c.x, c.y, localInk.r * s, localInk.a0, localInk.a1, false);
-        g.stroke();
-      }
+    for (const ink of boundaryInk) {
+      const localInk = inkWorldToLocal(ink, tile);
+      drawLocalInkStroke(g, localInk, toPix, s);
+      if (!isValidInkId(ink.id)) continue;
+      cg.strokeStyle = colorForCode(codeForInkId(ink.id));
+      drawLocalInkStroke(cg, localInk, toPix, s);
     }
 
-    const img = g.getImageData(0, 0, w, h);
-    const data = img.data;
+    const data = g.getImageData(0, 0, w, h).data;
+    const codeData = cg.getImageData(0, 0, w, h).data;
     const idx = (x, y) => (y * w + x) * 4;
 
     const insideShape = (x, y) => {
@@ -656,10 +876,14 @@ export function mountDesigner(root) {
       return pointInTile(v(lx, ly), tile);
     };
 
-    const WALL_THRESH = 170;
     const isWall = (x, y) => {
       const i = idx(x, y);
-      return data[i] < WALL_THRESH || data[i + 1] < WALL_THRESH || data[i + 2] < WALL_THRESH;
+      return data[i] < 170 || data[i + 1] < 170 || data[i + 2] < 170;
+    };
+
+    const wallCode = (x, y) => {
+      const i = idx(x, y);
+      return codeData[i] + (codeData[i + 1] << 8) + (codeData[i + 2] << 16);
     };
 
     const sx = Math.floor(seedPix.x);
@@ -668,6 +892,8 @@ export function mountDesigner(root) {
     if (!insideShape(sx, sy)) return null;
     if (isWall(sx, sy)) return null;
 
+    const touchedInkIds = new Set();
+    let usesTileBoundary = false;
     const visited = new Uint8Array(w * h);
     const qx = new Int32Array(w * h);
     const qy = new Int32Array(w * h);
@@ -694,7 +920,12 @@ export function mountDesigner(root) {
         const vi = ny * w + nx;
         if (visited[vi]) continue;
         if (!insideShape(nx, ny)) continue;
-        if (isWall(nx, ny)) continue;
+        if (isWall(nx, ny)) {
+          const code = wallCode(nx, ny);
+          if (code === TILE_BOUNDARY_CODE) usesTileBoundary = true;
+          if (code >= INK_CODE_OFFSET) touchedInkIds.add(inkIdFromCode(code));
+          continue;
+        }
         push(nx, ny);
       }
     }
@@ -741,16 +972,42 @@ export function mountDesigner(root) {
     }
     mg.putImageData(out, 0, 0);
 
+    const boundaryIds = [...touchedInkIds].sort((a, b) => a - b);
+    const closedByInk = isSeedClosedByBoundaryInk(seedLocal, tile, boundaryInk);
     const sig = `${w}:${h}:${count}:${hash >>> 0}`;
-    return { bmp: mask, minX, minY, wLocal, hLocal, sig };
+    return {
+      bmp: mask,
+      minX,
+      minY,
+      wLocal,
+      hLocal,
+      sig,
+      boundaryInkIds: boundaryIds,
+      usesTileBoundary,
+      closedByInk,
+    };
   }
 
   function getFillRenderData(fill, tile = state.tri, design = { ink: state.ink, fills: state.fills }) {
     if (!tile) return null;
-    const key = `${getFillCacheKey()}:${tile.shape}:${tile.side}`;
+    let discoveredData = null;
+    const designInkIdSet = new Set(design.ink.map((ink) => ink.id).filter((id) => isValidInkId(id)));
+    const hasBoundaryIds = Array.isArray(fill.boundaryInkIds);
+    const boundaryIdsValid = hasBoundaryIds && fill.boundaryInkIds.every((id) => designInkIdSet.has(id));
+
+    if (!hasBoundaryIds || !boundaryIdsValid) {
+      const discovered = discoverFillBoundaryDefinition(fill, tile, design);
+      if (!discovered) return null;
+      fill.boundaryInkIds = discovered.boundaryInkIds;
+      fill.usesTileBoundary = !!discovered.usesTileBoundary;
+      discoveredData = discovered.data;
+    }
+
+    const boundaryKey = fill.boundaryInkIds.join(",");
+    const key = `${getFillCacheKey()}:${tile.shape}:${tile.side}:${boundaryKey}:${fill.usesTileBoundary ? 1 : 0}`;
     const cached = fillCache.get(fill);
     if (cached && cached.key === key) return cached.data;
-    const data = computeFillMaskAtSeed(fill, tile, design);
+    const data = discoveredData || computeFillMaskAtSeed(fill, tile, design, fill.boundaryInkIds);
     fillCache.set(fill, { key, data });
     return data;
   }
@@ -1816,10 +2073,16 @@ export function mountDesigner(root) {
     if (drag.index < 0 || drag.index >= state.ink.length) return;
     if (!getSelectableInkLocalAtIndex(drag.index)) return;
     pushUndo();
-    const prevFillSignatures = captureFillSignatures();
-    state.ink[drag.index] = inkLocalToWorld(drag.previewInkLocal);
+    const movedInkId = state.ink[drag.index]?.id;
+    const updatedInk = inkLocalToWorld(drag.previewInkLocal);
+    if (isValidInkId(movedInkId)) updatedInk.id = movedInkId;
+    state.ink[drag.index] = updatedInk;
     markInkChanged();
-    pruneFillsAfterInkDelete(prevFillSignatures);
+    if (isValidInkId(movedInkId)) {
+      pruneInvalidFillsAfterInkChange([movedInkId], []);
+    } else {
+      pruneInvalidFillsAfterInkChange();
+    }
     state.selectedInkIndex = drag.index;
     updateHoverPick();
   }
@@ -1957,31 +2220,48 @@ export function mountDesigner(root) {
     return -1;
   }
 
-  function captureFillSignatures() {
-    const sigs = new Map();
-    for (const fill of state.fills) {
-      const data = getFillRenderData(fill);
-      sigs.set(fill, data ? data.sig : null);
-    }
-    return sigs;
+  function replaceActiveFills(nextFills) {
+    const activeDesign = getShapeDesign(state.tileShape);
+    const target = activeDesign?.fills || state.fills;
+    target.length = 0;
+    for (const fill of nextFills) target.push(fill);
+    if (activeDesign) activeDesign.fills = target;
+    state.fills = target;
   }
 
-  function pruneFillsAfterInkDelete(previousSignatures) {
+  function pruneInvalidFillsAfterInkChange(changedInkIds = [], deletedInkIds = []) {
+    const changedSet = new Set(changedInkIds);
+    const deletedSet = new Set(deletedInkIds);
     const kept = [];
+
     for (const fill of state.fills) {
-      const before = previousSignatures.get(fill);
-      const afterData = getFillRenderData(fill);
-      const after = afterData ? afterData.sig : null;
-      if (before && after && before === after) kept.push(fill);
+      if (!Array.isArray(fill.boundaryInkIds)) {
+        const discovered = getFillRenderData(fill);
+        if (!discovered) continue;
+      }
+
+      const boundaryIds = fill.boundaryInkIds || [];
+      if (boundaryIds.some((id) => deletedSet.has(id))) continue;
+      const hasBoundaryChange = changedSet.size && boundaryIds.some((id) => changedSet.has(id));
+      if (changedSet.size && !hasBoundaryChange) {
+        kept.push(fill);
+        continue;
+      }
+
+      const data = getFillRenderData(fill);
+      if (!data) continue;
+      if (hasBoundaryChange && !data.closedByInk) continue;
+      kept.push(fill);
     }
-    state.fills = kept;
+
+    replaceActiveFills(kept);
   }
 
   function deleteAtPoint(pLocal) {
     const inkIdx = findDeletableInkIndex(pLocal);
     if (inkIdx >= 0) {
       pushUndo();
-      const prevFillSignatures = captureFillSignatures();
+      const deletedInkId = state.ink[inkIdx]?.id;
       state.ink.splice(inkIdx, 1);
       if (state.selectedInkIndex === inkIdx) {
         clearSelection();
@@ -1989,7 +2269,7 @@ export function mountDesigner(root) {
         state.selectedInkIndex -= 1;
       }
       markInkChanged();
-      pruneFillsAfterInkDelete(prevFillSignatures);
+      pruneInvalidFillsAfterInkChange([], deletedInkId ? [deletedInkId] : []);
       updateHoverPick();
       requestRender();
       return true;
@@ -2161,11 +2441,20 @@ export function mountDesigner(root) {
         return;
       }
       pushUndo();
-      const fill = pointLocalToWorld(local);
-      const fillData = computeFillMaskAtSeed(fill);
-      if (fillData) {
+      const seed = pointLocalToWorld(local);
+      const discovered = discoverFillBoundaryDefinition(seed, state.tri, { ink: state.ink, fills: state.fills });
+      if (discovered) {
+        const fill = {
+          x: seed.x,
+          y: seed.y,
+          boundaryInkIds: discovered.boundaryInkIds,
+          usesTileBoundary: discovered.usesTileBoundary,
+        };
         state.fills.push(fill);
-        fillCache.set(fill, { key: `${getFillCacheKey()}:${state.tileShape}:${state.tri?.side || 0}`, data: fillData });
+        fillCache.set(fill, {
+          key: `${getFillCacheKey()}:${state.tri.shape}:${state.tri.side}:${fill.boundaryInkIds.join(",")}:${fill.usesTileBoundary ? 1 : 0}`,
+          data: discovered.data,
+        });
       }
       state.pointerDown = false;
       requestRender();
@@ -2235,7 +2524,7 @@ export function mountDesigner(root) {
 
       if (dragDist <= CLICK_EPS && state.hoverArcPick) {
         pushUndo();
-        state.ink.push(inkLocalToWorld(state.hoverArcPick.arc));
+        state.ink.push(createInk(inkLocalToWorld(state.hoverArcPick.arc)));
         markInkChanged();
         requestRender();
         return;
@@ -2243,7 +2532,7 @@ export function mountDesigner(root) {
 
       if (dragDist > 0.5 * state.dpr) {
         pushUndo();
-        state.ink.push(inkLocalToWorld({ type: "circle", c: d.startLocal, r: dragDist }));
+        state.ink.push(createInk(inkLocalToWorld({ type: "circle", c: d.startLocal, r: dragDist })));
         markInkChanged();
         requestRender();
         return;
@@ -2257,7 +2546,7 @@ export function mountDesigner(root) {
       const dist = len(sub(d.curLocal, d.startLocal));
       if (dist > 0.5 * state.dpr) {
         pushUndo();
-        state.ink.push(inkLocalToWorld({ type: "line", a: d.startLocal, b: d.curLocal }));
+        state.ink.push(createInk(inkLocalToWorld({ type: "line", a: d.startLocal, b: d.curLocal })));
         markInkChanged();
       }
       requestRender();
@@ -2367,6 +2656,7 @@ export function mountDesigner(root) {
     state.hover = null;
     state.hoverArcPick = null;
     state.shapeDesigns = createEmptyShapeDesigns();
+    state.nextInkId = 1;
     syncActiveDesignRefs();
     state.undoStack.length = 0;
     state.redoStack.length = 0;
