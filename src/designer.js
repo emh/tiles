@@ -68,6 +68,7 @@ export function mountDesigner(root) {
     hexagon: "tri",
     octagon: "square",
   };
+  const GRID_DIVISION_OPTIONS = [48, 24, 16, 12, 8];
   const ROTS_BY_SHAPE = {
     triangle: [0, TAU / 3, (2 * TAU) / 3],
     square: [0, TAU / 4, TAU / 2, (3 * TAU) / 4],
@@ -126,7 +127,7 @@ export function mountDesigner(root) {
 
     showGrid: true,
     snap: true,
-    gridTargetPx: 24,
+    gridDivisions: 16,
     showToolsPalette: true,
     grid: null,
 
@@ -354,13 +355,52 @@ export function mountDesigner(root) {
   }
 
   function computeGridForShape(shape, side) {
-    const target = Math.max(8, state.gridTargetPx * state.dpr);
-    let N = Math.max(12, Math.round(side / target));
+    let N = GRID_DIVISION_OPTIONS[0];
+    let bestErr = Infinity;
+    for (const candidate of GRID_DIVISION_OPTIONS) {
+      const err = Math.abs(candidate - state.gridDivisions);
+      if (err < bestErr) {
+        bestErr = err;
+        N = candidate;
+      }
+    }
     const mode = SHAPE_GRID_MODE[shape] === "square" ? "square" : "tri";
-    if (mode !== "square") N = Math.max(12, Math.round(N / 12) * 12);
     const step = side / N;
+    if (mode === "square") {
+      let halfExtent = side / 2;
+      if (shape === "octagon") {
+        // Octagon `side` is circumradius; grid should span the octagon's axis-aligned bounding square.
+        halfExtent = side * Math.cos(Math.PI / 8);
+      }
+      const span = halfExtent * 2;
+      return {
+        mode,
+        N,
+        step: span / N,
+        origin: v(-halfExtent, -halfExtent),
+      };
+    }
+
     const dy = (step * Math.sqrt(3)) / 2;
-    return { step, dy, N, mode };
+    let angle = 0;
+    let origin = v(side / 2, (side * Math.sqrt(3)) / 6);
+    if (shape === "hexagon") {
+      angle = Math.PI / 6;
+      origin = v((-Math.sqrt(3) * side) / 2, -side / 2);
+    }
+    const b1 = rot(v(step, 0), angle);
+    const b2 = rot(v(step / 2, dy), angle);
+    const det = b1.x * b2.y - b1.y * b2.x || 1;
+    return {
+      mode,
+      N,
+      step,
+      dy,
+      origin,
+      b1,
+      b2,
+      det,
+    };
   }
 
   function recomputeGrid() {
@@ -386,18 +426,99 @@ export function mountDesigner(root) {
   const localToScreenForTile = (tile, p) => add(p, tile.center);
   const screenToLocalForTile = (tile, p) => sub(p, tile.center);
 
+  function getTileScale(tile = state.tri) {
+    return tile?.side || 1;
+  }
+
+  function pointLocalToWorld(pLocal, tile = state.tri) {
+    const s = getTileScale(tile);
+    return v(pLocal.x / s, pLocal.y / s);
+  }
+
+  function pointWorldToLocal(pWorld, tile = state.tri) {
+    const s = getTileScale(tile);
+    return v(pWorld.x * s, pWorld.y * s);
+  }
+
+  function lengthLocalToWorld(lenLocal, tile = state.tri) {
+    return lenLocal / getTileScale(tile);
+  }
+
+  function lengthWorldToLocal(lenWorld, tile = state.tri) {
+    return lenWorld * getTileScale(tile);
+  }
+
+  function inkWorldToLocal(ink, tile = state.tri) {
+    if (ink.type === "line") {
+      return {
+        type: "line",
+        a: pointWorldToLocal(ink.a, tile),
+        b: pointWorldToLocal(ink.b, tile),
+      };
+    }
+    if (ink.type === "circle") {
+      return {
+        type: "circle",
+        c: pointWorldToLocal(ink.c, tile),
+        r: lengthWorldToLocal(ink.r, tile),
+      };
+    }
+    if (ink.type === "arc") {
+      return {
+        type: "arc",
+        c: pointWorldToLocal(ink.c, tile),
+        r: lengthWorldToLocal(ink.r, tile),
+        a0: ink.a0,
+        a1: ink.a1,
+      };
+    }
+    return JSON.parse(JSON.stringify(ink));
+  }
+
+  function inkLocalToWorld(ink, tile = state.tri) {
+    if (ink.type === "line") {
+      return {
+        type: "line",
+        a: pointLocalToWorld(ink.a, tile),
+        b: pointLocalToWorld(ink.b, tile),
+      };
+    }
+    if (ink.type === "circle") {
+      return {
+        type: "circle",
+        c: pointLocalToWorld(ink.c, tile),
+        r: lengthLocalToWorld(ink.r, tile),
+      };
+    }
+    if (ink.type === "arc") {
+      return {
+        type: "arc",
+        c: pointLocalToWorld(ink.c, tile),
+        r: lengthLocalToWorld(ink.r, tile),
+        a0: ink.a0,
+        a1: ink.a1,
+      };
+    }
+    return JSON.parse(JSON.stringify(ink));
+  }
+
   function snapToTriGrid(local) {
     if (!state.snap) return local;
     if (state.grid.mode === "square") {
-      const step = state.grid.step;
-      return v(Math.round(local.x / step) * step, Math.round(local.y / step) * step);
+      const { step, origin } = state.grid;
+      return v(
+        origin.x + Math.round((local.x - origin.x) / step) * step,
+        origin.y + Math.round((local.y - origin.y) / step) * step
+      );
     }
-    const { step, dy } = state.grid;
-    const vCoord = local.y / dy;
-    const uCoord = (local.x - (step / 2) * vCoord) / step;
+    const { origin, b1, b2, det } = state.grid;
+    const rx = local.x - origin.x;
+    const ry = local.y - origin.y;
+    const uCoord = (rx * b2.y - ry * b2.x) / det;
+    const vCoord = (ry * b1.x - rx * b1.y) / det;
     const ur = Math.round(uCoord);
     const vr = Math.round(vCoord);
-    return v(step * ur + (step / 2) * vr, dy * vr);
+    return v(origin.x + b1.x * ur + b2.x * vr, origin.y + b1.y * ur + b2.y * vr);
   }
 
   function pointInPrimaryShape(local) {
@@ -439,8 +560,9 @@ export function mountDesigner(root) {
     ctx.restore();
   }
 
-  function computeFillMaskAtSeed(seedLocal, tile = state.tri, design = { ink: state.ink, fills: state.fills }) {
+  function computeFillMaskAtSeed(seedWorld, tile = state.tri, design = { ink: state.ink, fills: state.fills }) {
     if (!tile) return null;
+    const seedLocal = pointWorldToLocal(seedWorld, tile);
     if (!pointInTile(seedLocal, tile)) return null;
 
     const verts = tile.polyLocal;
@@ -497,22 +619,23 @@ export function mountDesigner(root) {
     g.stroke();
 
     for (const o of design.ink) {
-      if (o.type === "line") {
-        const a = toPix(o.a);
-        const b = toPix(o.b);
+      const localInk = inkWorldToLocal(o, tile);
+      if (localInk.type === "line") {
+        const a = toPix(localInk.a);
+        const b = toPix(localInk.b);
         g.beginPath();
         g.moveTo(a.x, a.y);
         g.lineTo(b.x, b.y);
         g.stroke();
-      } else if (o.type === "circle") {
-        const c = toPix(o.c);
+      } else if (localInk.type === "circle") {
+        const c = toPix(localInk.c);
         g.beginPath();
-        g.arc(c.x, c.y, o.r * s, 0, TAU);
+        g.arc(c.x, c.y, localInk.r * s, 0, TAU);
         g.stroke();
-      } else if (o.type === "arc") {
-        const c = toPix(o.c);
+      } else if (localInk.type === "arc") {
+        const c = toPix(localInk.c);
         g.beginPath();
-        g.arc(c.x, c.y, o.r * s, o.a0, o.a1, false);
+        g.arc(c.x, c.y, localInk.r * s, localInk.a0, localInk.a1, false);
         g.stroke();
       }
     }
@@ -687,22 +810,30 @@ export function mountDesigner(root) {
       ctx.lineCap = "round";
       ctx.lineJoin = "round";
       for (const o of design.ink) {
-        if (o.type === "line") {
-          const p0 = rot(o.a, designAng);
-          const p1 = rot(o.b, designAng);
+        const localInk = inkWorldToLocal(o, primary);
+        if (localInk.type === "line") {
+          const p0 = rot(localInk.a, designAng);
+          const p1 = rot(localInk.b, designAng);
           ctx.beginPath();
           ctx.moveTo(center.x + p0.x * scale, center.y + p0.y * scale);
           ctx.lineTo(center.x + p1.x * scale, center.y + p1.y * scale);
           ctx.stroke();
-        } else if (o.type === "circle") {
-          const cc = rot(o.c, designAng);
+        } else if (localInk.type === "circle") {
+          const cc = rot(localInk.c, designAng);
           ctx.beginPath();
-          ctx.arc(center.x + cc.x * scale, center.y + cc.y * scale, o.r * scale, 0, TAU);
+          ctx.arc(center.x + cc.x * scale, center.y + cc.y * scale, localInk.r * scale, 0, TAU);
           ctx.stroke();
-        } else if (o.type === "arc") {
-          const cc = rot(o.c, designAng);
+        } else if (localInk.type === "arc") {
+          const cc = rot(localInk.c, designAng);
           ctx.beginPath();
-          ctx.arc(center.x + cc.x * scale, center.y + cc.y * scale, o.r * scale, o.a0 + designAng, o.a1 + designAng, false);
+          ctx.arc(
+            center.x + cc.x * scale,
+            center.y + cc.y * scale,
+            localInk.r * scale,
+            localInk.a0 + designAng,
+            localInk.a1 + designAng,
+            false
+          );
           ctx.stroke();
         }
       }
@@ -1163,7 +1294,7 @@ export function mountDesigner(root) {
     if (!state.showGrid) return;
     if (!tile) return;
     const grid = isActive ? state.grid : computeGridForShape(tile.shape, tile.side);
-    const { step, dy, mode } = grid;
+    const { step, mode } = grid;
 
     ctx.save();
     clipPrimaryTile(tile);
@@ -1181,30 +1312,75 @@ export function mountDesigner(root) {
       ctx.stroke();
     }
 
-    const d0 = v(1, 0);
-    const d60 = v(0.5, Math.sqrt(3) / 2);
-    const d120 = v(-0.5, Math.sqrt(3) / 2);
-
     const { minX, minY, maxX, maxY } = tile.bounds;
     if (mode === "square") {
-      for (let x = Math.floor(minX / step) * step; x <= maxX; x += step) {
+      const { origin } = grid;
+      for (let x = origin.x + Math.floor((minX - origin.x) / step) * step; x <= maxX + 1e-6; x += step) {
         drawLocalLine(v(x, 0), v(0, 1));
       }
-      for (let y = Math.floor(minY / step) * step; y <= maxY; y += step) {
+      for (let y = origin.y + Math.floor((minY - origin.y) / step) * step; y <= maxY + 1e-6; y += step) {
         drawLocalLine(v(0, y), v(1, 0));
       }
     } else {
-      for (let y = Math.floor(minY / dy) * dy; y <= maxY; y += dy) {
-        drawLocalLine(v(0, y), d0);
+      const { origin, b1, b2, det } = grid;
+      const b1Len = len(b1) || 1;
+      const b2Len = len(b2) || 1;
+      const w = sub(b2, b1);
+      const wLen = len(w) || 1;
+      const dirU = mul(b2, 1 / b2Len);
+      const dirV = mul(b1, 1 / b1Len);
+      const dirW = mul(w, 1 / wLen);
+
+      function toUV(p) {
+        const rx = p.x - origin.x;
+        const ry = p.y - origin.y;
+        const u = (rx * b2.y - ry * b2.x) / det;
+        const vv = (ry * b1.x - rx * b1.y) / det;
+        return { u, v: vv };
       }
 
-      const count = Math.ceil((maxX - minX) / step) + 10;
-      for (let i = -count; i <= count; i += 1) {
-        drawLocalLine(v(i * step, 0), d60);
-        drawLocalLine(v(i * step, 0), d120);
+      let minU = Infinity;
+      let maxU = -Infinity;
+      let minV = Infinity;
+      let maxV = -Infinity;
+      let minK = Infinity;
+      let maxK = -Infinity;
+      for (const p of tile.polyLocal) {
+        const uv = toUV(p);
+        minU = Math.min(minU, uv.u);
+        maxU = Math.max(maxU, uv.u);
+        minV = Math.min(minV, uv.v);
+        maxV = Math.max(maxV, uv.v);
+        minK = Math.min(minK, uv.u + uv.v);
+        maxK = Math.max(maxK, uv.u + uv.v);
+      }
+
+      const pad = 2;
+      for (let u = Math.floor(minU) - pad; u <= Math.ceil(maxU) + pad; u += 1) {
+        drawLocalLine(add(origin, mul(b1, u)), dirU);
+      }
+      for (let vv = Math.floor(minV) - pad; vv <= Math.ceil(maxV) + pad; vv += 1) {
+        drawLocalLine(add(origin, mul(b2, vv)), dirV);
+      }
+      for (let k = Math.floor(minK) - pad; k <= Math.ceil(maxK) + pad; k += 1) {
+        drawLocalLine(add(origin, mul(b1, k)), dirW);
       }
     }
 
+    ctx.restore();
+  }
+
+  function drawGridCenterMarker(tile, isActive = false) {
+    if (!state.showGrid) return;
+    if (!tile) return;
+    const p = tile.center;
+    const r = (isActive ? 2.8 : 2.2) * state.dpr;
+    ctx.save();
+    ctx.fillStyle = "#111";
+    ctx.globalAlpha = isActive ? 0.95 : 0.7;
+    ctx.beginPath();
+    ctx.arc(p.x, p.y, r, 0, TAU);
+    ctx.fill();
     ctx.restore();
   }
 
@@ -1258,22 +1434,23 @@ export function mountDesigner(root) {
     ctx.lineJoin = "round";
 
     for (const o of design.ink) {
-      if (o.type === "line") {
-        const a = localToScreenForTile(tile, o.a);
-        const b = localToScreenForTile(tile, o.b);
+      const localInk = inkWorldToLocal(o, tile);
+      if (localInk.type === "line") {
+        const a = localToScreenForTile(tile, localInk.a);
+        const b = localToScreenForTile(tile, localInk.b);
         ctx.beginPath();
         ctx.moveTo(a.x, a.y);
         ctx.lineTo(b.x, b.y);
         ctx.stroke();
-      } else if (o.type === "circle") {
-        const c = localToScreenForTile(tile, o.c);
+      } else if (localInk.type === "circle") {
+        const c = localToScreenForTile(tile, localInk.c);
         ctx.beginPath();
-        ctx.arc(c.x, c.y, o.r, 0, TAU);
+        ctx.arc(c.x, c.y, localInk.r, 0, TAU);
         ctx.stroke();
-      } else if (o.type === "arc") {
-        const c = localToScreenForTile(tile, o.c);
+      } else if (localInk.type === "arc") {
+        const c = localToScreenForTile(tile, localInk.c);
         ctx.beginPath();
-        ctx.arc(c.x, c.y, o.r, o.a0, o.a1, false);
+        ctx.arc(c.x, c.y, localInk.r, localInk.a0, localInk.a1, false);
         ctx.stroke();
       }
     }
@@ -1334,7 +1511,7 @@ export function mountDesigner(root) {
   function findDeletableInkIndex(pLocal) {
     const thresh = 10 * state.dpr;
     for (let i = state.ink.length - 1; i >= 0; i -= 1) {
-      const o = state.ink[i];
+      const o = inkWorldToLocal(state.ink[i]);
       if (o.type === "line") {
         if (pointToSegmentDistance(pLocal, o.a, o.b) <= thresh) return i;
         continue;
@@ -1432,11 +1609,12 @@ export function mountDesigner(root) {
     let best = null;
     const thresh = 16 * state.dpr;
     for (const o of state.ink) {
-      if (o.type !== "circle") continue;
-      const d = len(sub(pLocal, o.c));
-      const distToCirc = Math.abs(d - o.r);
+      const circle = inkWorldToLocal(o);
+      if (circle.type !== "circle") continue;
+      const d = len(sub(pLocal, circle.c));
+      const distToCirc = Math.abs(d - circle.r);
       if (distToCirc > thresh) continue;
-      if (!best || distToCirc < best.distToCirc) best = { circle: o, distToCirc, d };
+      if (!best || distToCirc < best.distToCirc) best = { circle, distToCirc, d };
     }
     return best;
   }
@@ -1492,6 +1670,7 @@ export function mountDesigner(root) {
     }
     for (const tile of tiles) {
       drawInnerTriGrid(tile, tile.shape === state.tileShape);
+      drawGridCenterMarker(tile, tile.shape === state.tileShape);
     }
     drawNearestGridPoint();
 
@@ -1555,7 +1734,7 @@ export function mountDesigner(root) {
         return;
       }
       pushUndo();
-      const fill = { x: local.x, y: local.y };
+      const fill = pointLocalToWorld(local);
       const fillData = computeFillMaskAtSeed(fill);
       if (fillData) {
         state.fills.push(fill);
@@ -1610,7 +1789,7 @@ export function mountDesigner(root) {
 
       if (dragDist <= CLICK_EPS && state.hoverArcPick) {
         pushUndo();
-        state.ink.push(state.hoverArcPick.arc);
+        state.ink.push(inkLocalToWorld(state.hoverArcPick.arc));
         markInkChanged();
         requestRender();
         return;
@@ -1618,7 +1797,7 @@ export function mountDesigner(root) {
 
       if (dragDist > 0.5 * state.dpr) {
         pushUndo();
-        state.ink.push({ type: "circle", c: d.startLocal, r: dragDist });
+        state.ink.push(inkLocalToWorld({ type: "circle", c: d.startLocal, r: dragDist }));
         markInkChanged();
         requestRender();
         return;
@@ -1632,7 +1811,7 @@ export function mountDesigner(root) {
       const dist = len(sub(d.curLocal, d.startLocal));
       if (dist > 0.5 * state.dpr) {
         pushUndo();
-        state.ink.push({ type: "line", a: d.startLocal, b: d.curLocal });
+        state.ink.push(inkLocalToWorld({ type: "line", a: d.startLocal, b: d.curLocal }));
         markInkChanged();
       }
       requestRender();
@@ -1671,7 +1850,7 @@ export function mountDesigner(root) {
     setSelectableState(itemSnap, state.snap);
     for (const item of gridSizeItems) {
       if (!(item instanceof HTMLElement)) continue;
-      setSelectableState(item, Number(item.dataset.gridSize) === state.gridTargetPx);
+      setSelectableState(item, Number(item.dataset.gridSize) === state.gridDivisions);
     }
   }
 
@@ -1804,8 +1983,17 @@ export function mountDesigner(root) {
     requestRender();
   }
 
-  function onGridSizeChange(sizePx) {
-    state.gridTargetPx = sizePx;
+  function onGridSizeChange(divisions) {
+    let next = GRID_DIVISION_OPTIONS[0];
+    let bestErr = Infinity;
+    for (const candidate of GRID_DIVISION_OPTIONS) {
+      const err = Math.abs(candidate - divisions);
+      if (err < bestErr) {
+        bestErr = err;
+        next = candidate;
+      }
+    }
+    state.gridDivisions = next;
     recomputeGrid();
     syncGridMenu();
     updateHoverPick();

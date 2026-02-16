@@ -222,23 +222,23 @@ function App() {
           h("hr", { class: "menu-sep" }),
           h("div", { class: "menu-section-label" }, "Size"),
           menuSelectableItem(
-            { "data-grid-size": "12", role: "menuitemradio", "aria-checked": "false" },
+            { "data-grid-size": "48", role: "menuitemradio", "aria-checked": "false" },
             "XS"
           ),
           menuSelectableItem(
-            { "data-grid-size": "16", role: "menuitemradio", "aria-checked": "false" },
+            { "data-grid-size": "24", role: "menuitemradio", "aria-checked": "false" },
             "S"
           ),
           menuSelectableItem(
-            { "data-grid-size": "24", role: "menuitemradio", "aria-checked": "true", class: "selected" },
+            { "data-grid-size": "16", role: "menuitemradio", "aria-checked": "true", class: "selected" },
             "M"
           ),
           menuSelectableItem(
-            { "data-grid-size": "32", role: "menuitemradio", "aria-checked": "false" },
+            { "data-grid-size": "12", role: "menuitemradio", "aria-checked": "false" },
             "L"
           ),
           menuSelectableItem(
-            { "data-grid-size": "40", role: "menuitemradio", "aria-checked": "false" },
+            { "data-grid-size": "8", role: "menuitemradio", "aria-checked": "false" },
             "XL"
           )
         )
