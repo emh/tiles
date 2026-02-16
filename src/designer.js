@@ -1532,19 +1532,20 @@ export function mountDesigner(root) {
       const cos8 = Math.cos(Math.PI / 8);
       const octR = getUnitForShape("octagon");
       const edge = 2 * octR * sin8;
-      const pitch = 2 * octR * (cos8 + sin8);
+      // For the centered 45-degree squares in 4.8^2, adjacent octagon centers are 2R*cos(pi/8) apart.
+      const pitch = 2 * octR * cos8;
       const x0 = -pitch;
       const y0 = -pitch;
       const x1 = vw + pitch;
       const y1 = vh + pitch;
       const octDesignRots = [0, Math.PI / 2, Math.PI, (3 * Math.PI) / 2];
+      const sqGeomAng = Math.PI / 4;
 
       for (let y = y0; y <= y1; y += pitch) {
         for (let x = x0; x <= x1; x += pitch) {
           const octDesignAng = octDesignRots[Math.floor(rnd() * octDesignRots.length)];
           stamp("octagon", v(x, y), octR, 0, octDesignAng);
-          stamp("square", v(x + pitch / 2, y), edge, 0);
-          stamp("square", v(x, y + pitch / 2), edge, 0);
+          stamp("square", v(x + pitch / 2, y + pitch / 2), edge, sqGeomAng);
         }
       }
     }
