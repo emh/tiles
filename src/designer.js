@@ -52,11 +52,27 @@ export function mountDesigner(root) {
   }
 
   const TAU = Math.PI * 2;
-  const TILE_SHAPES = ["triangle", "square", "hexagon"];
+  const SHAPES = ["triangle", "square", "hexagon", "octagon"];
+  const TILING_OPTIONS = {
+    triangle: { shapes: ["triangle"] },
+    square: { shapes: ["square"] },
+    hexagon: { shapes: ["hexagon"] },
+    "tiling-3464": { shapes: ["hexagon", "triangle", "square"] },
+    "tiling-48-2": { shapes: ["octagon", "square"] },
+    "tiling-33-434": { shapes: ["square", "triangle"] },
+  };
+  const DEFAULT_TILING = "triangle";
+  const SHAPE_GRID_MODE = {
+    triangle: "tri",
+    square: "square",
+    hexagon: "tri",
+    octagon: "square",
+  };
   const ROTS_BY_SHAPE = {
     triangle: [0, TAU / 3, (2 * TAU) / 3],
     square: [0, TAU / 4, TAU / 2, (3 * TAU) / 4],
     hexagon: [0, TAU / 6, (2 * TAU) / 6, (3 * TAU) / 6, (4 * TAU) / 6, (5 * TAU) / 6],
+    octagon: [0, TAU / 8, (2 * TAU) / 8, (3 * TAU) / 8, (4 * TAU) / 8, (5 * TAU) / 8, (6 * TAU) / 8, (7 * TAU) / 8],
   };
   const BG_SCALE = 0.165;
   const BG_SEED = 1337;
@@ -102,8 +118,9 @@ export function mountDesigner(root) {
     vw: 0,
     vh: 0,
     tool: "line",
+    tilingId: DEFAULT_TILING,
     tileShape: "triangle",
-    pendingTileShape: "triangle",
+    pendingTilingId: DEFAULT_TILING,
     shapeDialogOpen: true,
     shapeDialogRequired: true,
 
@@ -113,7 +130,9 @@ export function mountDesigner(root) {
     showToolsPalette: true,
     grid: null,
 
+    primaryTiles: [],
     tri: null,
+    shapeDesigns: Object.fromEntries(SHAPES.map((shape) => [shape, { ink: [], fills: [] }])),
 
     ink: [],
     fills: [],
@@ -135,6 +154,7 @@ export function mountDesigner(root) {
   let rafId = 0;
   const unsubs = [];
   let fillCache = new WeakMap();
+  let mixed33434Cache = null;
   const menuState = {
     openMenu: null,
   };
@@ -144,18 +164,48 @@ export function mountDesigner(root) {
     unsubs.push(() => target.removeEventListener(type, handler, options));
   }
 
-  function isTileShape(shape) {
-    return TILE_SHAPES.includes(shape);
+  function isShape(shape) {
+    return SHAPES.includes(shape);
+  }
+
+  function isTilingOption(id) {
+    return Object.hasOwn(TILING_OPTIONS, id);
+  }
+
+  function getTilingOption(id) {
+    return TILING_OPTIONS[id] || TILING_OPTIONS[DEFAULT_TILING];
+  }
+
+  function getShapeDesign(shape) {
+    return state.shapeDesigns[shape];
+  }
+
+  function syncActiveDesignRefs() {
+    const design = getShapeDesign(state.tileShape);
+    if (!design) return;
+    state.ink = design.ink;
+    state.fills = design.fills;
   }
 
   function cloneFill(f) {
     return { x: f.x, y: f.y };
   }
 
-  function snapshot() {
+  function cloneDesign(design) {
     return {
-      ink: state.ink.map((o) => JSON.parse(JSON.stringify(o))),
-      fills: state.fills.map(cloneFill),
+      ink: design.ink.map((o) => JSON.parse(JSON.stringify(o))),
+      fills: design.fills.map(cloneFill),
+    };
+  }
+
+  function snapshot() {
+    const designs = {};
+    for (const shape of SHAPES) {
+      designs[shape] = cloneDesign(getShapeDesign(shape));
+    }
+    return {
+      tileShape: state.tileShape,
+      designs,
     };
   }
 
@@ -167,8 +217,14 @@ export function mountDesigner(root) {
   }
 
   function restoreSnap(snap) {
-    state.ink = snap.ink.map((o) => JSON.parse(JSON.stringify(o)));
-    state.fills = snap.fills.map(cloneFill);
+    const nextDesigns = Object.fromEntries(
+      SHAPES.map((shape) => {
+        const design = snap.designs?.[shape] || { ink: [], fills: [] };
+        return [shape, cloneDesign(design)];
+      })
+    );
+    state.shapeDesigns = nextDesigns;
+    setActiveShape(snap.tileShape, false);
     markInkChanged();
   }
 
@@ -201,30 +257,33 @@ export function mountDesigner(root) {
     requestRender();
   }
 
-  function recomputeBigTriangle() {
-    const center = v(state.vw * 0.5, state.vh * 0.54);
-    const minDim = Math.min(state.vw, state.vh);
-    let side = minDim * 0.58;
-    let polyLocal = [];
-
-    if (state.tileShape === "triangle") {
+  function shapePolyLocal(shape, side) {
+    if (shape === "triangle") {
       const h = (side * Math.sqrt(3)) / 2;
-      const A0 = v(0, -(2 / 3) * h);
-      const B0 = v(-side / 2, (1 / 3) * h);
-      const C0 = v(side / 2, (1 / 3) * h);
-      polyLocal = [A0, B0, C0];
-    } else if (state.tileShape === "square") {
-      side = minDim * 0.54;
+      return [v(0, -(2 / 3) * h), v(-side / 2, (1 / 3) * h), v(side / 2, (1 / 3) * h)];
+    }
+    if (shape === "square") {
       const hh = side / 2;
-      polyLocal = [v(-hh, -hh), v(hh, -hh), v(hh, hh), v(-hh, hh)];
-    } else {
-      side = minDim * 0.34;
+      return [v(-hh, -hh), v(hh, -hh), v(hh, hh), v(-hh, hh)];
+    }
+    if (shape === "hexagon") {
+      const poly = [];
       for (let i = 0; i < 6; i += 1) {
         const ang = -Math.PI / 2 + (i * TAU) / 6;
-        polyLocal.push(v(Math.cos(ang) * side, Math.sin(ang) * side));
+        poly.push(v(Math.cos(ang) * side, Math.sin(ang) * side));
       }
+      return poly;
     }
+    const poly = [];
+    const rotOffset = Math.PI / 8;
+    for (let i = 0; i < 8; i += 1) {
+      const ang = -Math.PI / 2 + rotOffset + (i * TAU) / 8;
+      poly.push(v(Math.cos(ang) * side, Math.sin(ang) * side));
+    }
+    return poly;
+  }
 
+  function polyBounds(polyLocal) {
     let minX = Infinity;
     let minY = Infinity;
     let maxX = -Infinity;
@@ -235,31 +294,97 @@ export function mountDesigner(root) {
       maxX = Math.max(maxX, p.x);
       maxY = Math.max(maxY, p.y);
     }
+    return { minX, minY, maxX, maxY, w: maxX - minX, h: maxY - minY };
+  }
 
+  function buildPrimaryTile(shape, side, center) {
+    const polyLocal = shapePolyLocal(shape, side);
+    const bounds = polyBounds(polyLocal);
     const poly = polyLocal.map((p) => add(center, p));
-    state.tri = {
-      center,
-      side,
-      polyLocal,
-      poly,
-      bounds: { minX, minY, maxX, maxY, w: maxX - minX, h: maxY - minY },
-    };
+    return { shape, side, center, polyLocal, poly, bounds };
+  }
+
+  function recomputeBigTriangle() {
+    const mode = getTilingOption(state.tilingId);
+    const modeShapes = mode.shapes;
+    const minDim = Math.min(state.vw, state.vh);
+    const centerY = state.vh * 0.57;
+    const centerX = state.vw * 0.5;
+    const tiles = [];
+
+    if (!modeShapes.includes(state.tileShape)) {
+      state.tileShape = modeShapes[0];
+    }
+
+    if (modeShapes.length === 1) {
+      const shape = modeShapes[0];
+      let side = minDim * 0.58;
+      if (shape === "square") side = minDim * 0.54;
+      if (shape === "hexagon") side = minDim * 0.34;
+      if (shape === "octagon") side = minDim * 0.29;
+      tiles.push(buildPrimaryTile(shape, side, v(centerX, centerY)));
+    } else {
+      const templates = modeShapes.map((shape) => {
+        const b = polyBounds(shapePolyLocal(shape, 1));
+        return { shape, bounds: b };
+      });
+      const gap = minDim * 0.06;
+      const availW = state.vw * 0.84;
+      const availH = Math.min(state.vh * 0.34, minDim * 0.43);
+      const sumW = templates.reduce((acc, t) => acc + t.bounds.w, 0);
+      const maxH = Math.max(...templates.map((t) => t.bounds.h));
+      const sideFromW = (availW - gap * (templates.length - 1)) / Math.max(1, sumW);
+      const sideFromH = availH / Math.max(1, maxH);
+      const side = Math.max(28 * state.dpr, Math.min(sideFromW, sideFromH));
+      const totalW = sumW * side + gap * (templates.length - 1);
+      let x = centerX - totalW / 2;
+      for (const t of templates) {
+        const cx = x - t.bounds.minX * side;
+        tiles.push(buildPrimaryTile(t.shape, side, v(cx, centerY)));
+        x += t.bounds.w * side + gap;
+      }
+    }
+
+    state.primaryTiles = tiles;
+    state.tri = state.primaryTiles.find((tile) => tile.shape === state.tileShape) || state.primaryTiles[0] || null;
+    if (state.tri) state.tileShape = state.tri.shape;
+    syncActiveDesignRefs();
     state.geomRevision += 1;
     invalidateFillCache();
   }
 
-  function recomputeGrid() {
-    const side = state.tri.side;
+  function computeGridForShape(shape, side) {
     const target = Math.max(8, state.gridTargetPx * state.dpr);
     let N = Math.max(12, Math.round(side / target));
-    if (state.tileShape !== "square") N = Math.max(12, Math.round(N / 12) * 12);
+    const mode = SHAPE_GRID_MODE[shape] === "square" ? "square" : "tri";
+    if (mode !== "square") N = Math.max(12, Math.round(N / 12) * 12);
     const step = side / N;
     const dy = (step * Math.sqrt(3)) / 2;
-    state.grid = { step, dy, N, mode: state.tileShape === "square" ? "square" : "tri" };
+    return { step, dy, N, mode };
+  }
+
+  function recomputeGrid() {
+    if (!state.tri) return;
+    state.grid = computeGridForShape(state.tileShape, state.tri.side);
+  }
+
+  function setActiveShape(shape, shouldRender = true) {
+    if (!isShape(shape)) return;
+    const tile = state.primaryTiles.find((t) => t.shape === shape) || state.primaryTiles[0];
+    if (!tile) return;
+    state.tileShape = tile.shape;
+    state.tri = tile;
+    syncActiveDesignRefs();
+    recomputeGrid();
+    state.hover = null;
+    state.hoverArcPick = null;
+    if (shouldRender) requestRender();
   }
 
   const screenToLocal = (p) => sub(p, state.tri.center);
   const localToScreen = (p) => add(p, state.tri.center);
+  const localToScreenForTile = (tile, p) => add(p, tile.center);
+  const screenToLocalForTile = (tile, p) => sub(p, tile.center);
 
   function snapToTriGrid(local) {
     if (!state.snap) return local;
@@ -276,12 +401,25 @@ export function mountDesigner(root) {
   }
 
   function pointInPrimaryShape(local) {
-    if (!state.tri) return false;
-    if (state.tileShape === "triangle") {
-      const [a, b, c] = state.tri.polyLocal;
+    return pointInTile(local, state.tri);
+  }
+
+  function pointInTile(local, tile) {
+    if (!tile) return false;
+    if (tile.shape === "triangle") {
+      const [a, b, c] = tile.polyLocal;
       return pointInTri(local, a, b, c);
     }
-    return pointInPoly(local, state.tri.polyLocal);
+    return pointInPoly(local, tile.polyLocal);
+  }
+
+  function findPrimaryTileAtScreen(pScreen) {
+    for (let i = state.primaryTiles.length - 1; i >= 0; i -= 1) {
+      const tile = state.primaryTiles[i];
+      const local = screenToLocalForTile(tile, pScreen);
+      if (pointInTile(local, tile)) return tile;
+    }
+    return null;
   }
 
   function requestRender() {
@@ -301,11 +439,11 @@ export function mountDesigner(root) {
     ctx.restore();
   }
 
-  function computeFillMaskAtSeed(seedLocal) {
-    const t = state.tri;
-    if (!pointInPrimaryShape(seedLocal)) return null;
+  function computeFillMaskAtSeed(seedLocal, tile = state.tri, design = { ink: state.ink, fills: state.fills }) {
+    if (!tile) return null;
+    if (!pointInTile(seedLocal, tile)) return null;
 
-    const verts = t.polyLocal;
+    const verts = tile.polyLocal;
     let minX = Infinity;
     let minY = Infinity;
     let maxX = -Infinity;
@@ -358,7 +496,7 @@ export function mountDesigner(root) {
     g.closePath();
     g.stroke();
 
-    for (const o of state.ink) {
+    for (const o of design.ink) {
       if (o.type === "line") {
         const a = toPix(o.a);
         const b = toPix(o.b);
@@ -386,7 +524,7 @@ export function mountDesigner(root) {
     const insideShape = (x, y) => {
       const lx = x / s + minX;
       const ly = y / s + minY;
-      return pointInPrimaryShape(v(lx, ly));
+      return pointInTile(v(lx, ly), tile);
     };
 
     const WALL_THRESH = 170;
@@ -478,11 +616,12 @@ export function mountDesigner(root) {
     return { bmp: mask, minX, minY, wLocal, hLocal, sig };
   }
 
-  function getFillRenderData(fill) {
-    const key = getFillCacheKey();
+  function getFillRenderData(fill, tile = state.tri, design = { ink: state.ink, fills: state.fills }) {
+    if (!tile) return null;
+    const key = `${getFillCacheKey()}:${tile.shape}:${tile.side}`;
     const cached = fillCache.get(fill);
     if (cached && cached.key === key) return cached.data;
-    const data = computeFillMaskAtSeed(fill);
+    const data = computeFillMaskAtSeed(fill, tile, design);
     fillCache.set(fill, { key, data });
     return data;
   }
@@ -497,13 +636,13 @@ export function mountDesigner(root) {
   }
 
   function renderBackgroundTiling() {
-    const t = state.tri;
-    const unit = t.side * BG_SCALE;
-    const scale = unit / t.side;
+    if (!state.primaryTiles.length) return;
+    const mode = getTilingOption(state.tilingId);
+    const tileByShape = Object.fromEntries(state.primaryTiles.map((tile) => [tile.shape, tile]));
     const rnd = mulberry32(BG_SEED >>> 0);
-    const rots = ROTS_BY_SHAPE[state.tileShape] || [0];
 
-    function chooseRot(base = 0) {
+    function chooseRot(shape, base = 0) {
+      const rots = ROTS_BY_SHAPE[shape] || [0];
       return base + rots[Math.floor(rnd() * rots.length)];
     }
 
@@ -515,17 +654,29 @@ export function mountDesigner(root) {
       ctx.closePath();
     }
 
-    function drawTileAt(points, center, ang) {
+    function getUnitForShape(shape, fallback = 72 * state.dpr) {
+      const tile = tileByShape[shape];
+      if (!tile) return fallback;
+      return tile.side * BG_SCALE;
+    }
+
+    function drawShapeTile(shape, center, side, geomAng = 0, designAng = geomAng) {
+      const primary = tileByShape[shape];
+      const design = getShapeDesign(shape);
+      if (!primary || !design) return;
+      const points = shapePolyLocal(shape, side).map((p) => add(center, rot(p, geomAng)));
+
       ctx.save();
       pathPoly(points);
       ctx.clip();
 
-      for (const fill of state.fills) {
-        const f = getFillRenderData(fill);
+      const scale = side / primary.side;
+      for (const fill of design.fills) {
+        const f = getFillRenderData(fill, primary, design);
         if (!f) continue;
         ctx.save();
         ctx.translate(center.x, center.y);
-        ctx.rotate(ang);
+        ctx.rotate(designAng);
         ctx.scale(scale, scale);
         ctx.drawImage(f.bmp, f.minX, f.minY, f.wLocal, f.hLocal);
         ctx.restore();
@@ -535,94 +686,423 @@ export function mountDesigner(root) {
       ctx.lineWidth = 2 * state.dpr;
       ctx.lineCap = "round";
       ctx.lineJoin = "round";
-      for (const o of state.ink) {
+      for (const o of design.ink) {
         if (o.type === "line") {
-          const p0 = rot(o.a, ang);
-          const p1 = rot(o.b, ang);
+          const p0 = rot(o.a, designAng);
+          const p1 = rot(o.b, designAng);
           ctx.beginPath();
           ctx.moveTo(center.x + p0.x * scale, center.y + p0.y * scale);
           ctx.lineTo(center.x + p1.x * scale, center.y + p1.y * scale);
           ctx.stroke();
         } else if (o.type === "circle") {
-          const cc = rot(o.c, ang);
+          const cc = rot(o.c, designAng);
           ctx.beginPath();
           ctx.arc(center.x + cc.x * scale, center.y + cc.y * scale, o.r * scale, 0, TAU);
           ctx.stroke();
         } else if (o.type === "arc") {
-          const cc = rot(o.c, ang);
+          const cc = rot(o.c, designAng);
           ctx.beginPath();
-          ctx.arc(center.x + cc.x * scale, center.y + cc.y * scale, o.r * scale, o.a0 + ang, o.a1 + ang, false);
+          ctx.arc(center.x + cc.x * scale, center.y + cc.y * scale, o.r * scale, o.a0 + designAng, o.a1 + designAng, false);
           ctx.stroke();
         }
       }
 
       ctx.restore();
+      return points;
+    }
+
+    const outlineTiles = [];
+
+    function stamp(shape, center, side, geomAng = 0, designAng = chooseRot(shape, geomAng)) {
+      const points = drawShapeTile(shape, center, side, geomAng, designAng);
+      if (points?.length) outlineTiles.push(points);
+    }
+
+    function lineIntersection(a0, a1, b0, b1) {
+      const r = sub(a1, a0);
+      const s = sub(b1, b0);
+      const den = r.x * s.y - r.y * s.x;
+      if (Math.abs(den) < 1e-9) return null;
+      const qp = sub(b0, a0);
+      const t = (qp.x * s.y - qp.y * s.x) / den;
+      return add(a0, mul(r, t));
+    }
+
+    function drawSingleShapeBackground(shape) {
+      const unit = getUnitForShape(shape);
+      if (shape === "triangle") {
+        const S = unit;
+        const H = (S * Math.sqrt(3)) / 2;
+        const x0 = -S;
+        const y0 = -2 * H;
+        const x1 = state.vw + S;
+        const y1 = state.vh + 2 * H;
+
+        for (let y = y0; y <= y1; y += H) {
+          const row = Math.round((y - y0) / H);
+          const xOffset = row % 2 === 0 ? 0 : S / 2;
+          for (let x = x0 + xOffset; x <= x1; x += S) {
+            const up0 = v(x + S / 2, y);
+            const up1 = v(x, y + H);
+            const up2 = v(x + S, y + H);
+            const dn0 = v(x, y + H);
+            const dn1 = v(x + S, y + H);
+            const dn2 = v(x + S / 2, y + 2 * H);
+            stamp("triangle", v((up0.x + up1.x + up2.x) / 3, (up0.y + up1.y + up2.y) / 3), S, 0);
+            stamp("triangle", v((dn0.x + dn1.x + dn2.x) / 3, (dn0.y + dn1.y + dn2.y) / 3), S, Math.PI);
+          }
+        }
+        return;
+      }
+      if (shape === "square") {
+        const S = unit;
+        for (let y = -S; y <= state.vh + S; y += S) {
+          for (let x = -S; x <= state.vw + S; x += S) {
+            stamp("square", v(x + S / 2, y + S / 2), S, 0);
+          }
+        }
+        return;
+      }
+      if (shape === "hexagon") {
+        const s = unit;
+        const w = Math.sqrt(3) * s;
+        const rowH = 1.5 * s;
+        const cols = Math.ceil(state.vw / w) + 8;
+        const rows = Math.ceil(state.vh / rowH) + 8;
+        const cx0 = state.vw * 0.5;
+        const cy0 = state.vh * 0.5;
+        for (let r = -rows; r <= rows; r += 1) {
+          for (let q = -cols; q <= cols; q += 1) {
+            const cx = cx0 + Math.sqrt(3) * s * (q + r / 2);
+            const cy = cy0 + rowH * r;
+            if (cx < -w || cx > state.vw + w || cy < -2 * s || cy > state.vh + 2 * s) continue;
+            stamp("hexagon", v(cx, cy), s, 0);
+          }
+        }
+        return;
+      }
+      const s = unit;
+      const step = s * 2.2;
+      for (let y = -step; y <= state.vh + step; y += step) {
+        for (let x = -step; x <= state.vw + step; x += step) {
+          stamp("octagon", v(x, y), s, 0);
+        }
+      }
+    }
+
+    function drawMixed3464() {
+      const a = Math.max(8 * state.dpr, Math.min(getUnitForShape("hexagon"), getUnitForShape("triangle"), getUnitForShape("square")));
+      const D = a * (Math.sqrt(3) + 1);
+      const rowH = D * Math.sqrt(3) / 2;
+      const pad = D * 2.6;
+      const origin = v(state.vw * 0.5, state.vh * 0.5);
+      const spanI = Math.ceil((state.vw + 2 * pad) / D) + 6;
+      const spanJ = Math.ceil((state.vh + 2 * pad) / rowH) + 6;
+
+      const lattice = (i, j) => v(origin.x + i * D + j * D * 0.5, origin.y + j * rowH);
+      const onScreen = (p, margin = pad) =>
+        p.x >= -margin && p.x <= state.vw + margin && p.y >= -margin && p.y <= state.vh + margin;
+
+      function inwardSquareEdgeLine(p0, p1, faceCenter) {
+        const c = mul(add(p0, p1), 0.5);
+        const edgeDir = sub(p1, p0);
+        const L = len(edgeDir) || 1;
+        const n = mul(edgeDir, 1 / L);
+        const t = v(-n.y, n.x);
+        const sideSign = dot(sub(faceCenter, c), t) >= 0 ? 1 : -1;
+        const o = add(c, mul(t, sideSign * a * 0.5));
+        return [add(o, mul(n, a * 0.5)), add(o, mul(n, -a * 0.5))];
+      }
+
+      function stampFaceTriangle(A, B, C) {
+        const center = mul(add(add(A, B), C), 1 / 3);
+        if (!onScreen(center)) return;
+        const [ab0, ab1] = inwardSquareEdgeLine(A, B, center);
+        const [bc0, bc1] = inwardSquareEdgeLine(B, C, center);
+        const [ca0, ca1] = inwardSquareEdgeLine(C, A, center);
+        const v0 = lineIntersection(ab0, ab1, bc0, bc1);
+        const v1 = lineIntersection(bc0, bc1, ca0, ca1);
+        const v2 = lineIntersection(ca0, ca1, ab0, ab1);
+        if (!v0 || !v1 || !v2) return;
+        const triCenter = mul(add(add(v0, v1), v2), 1 / 3);
+        const geomAng = Math.atan2(v0.y - triCenter.y, v0.x - triCenter.x) + Math.PI / 2;
+        stamp("triangle", triCenter, a, geomAng);
+      }
+
+      const edgeDirs = [[1, 0], [0, 1], [-1, 1]];
+
+      for (let j = -spanJ; j <= spanJ; j += 1) {
+        for (let i = -spanI; i <= spanI; i += 1) {
+          const A = lattice(i, j);
+          if (onScreen(A, pad * 0.7)) {
+            stamp("hexagon", A, a, 0);
+          }
+
+          for (const [di, dj] of edgeDirs) {
+            const B = lattice(i + di, j + dj);
+            const sqCenter = mul(add(A, B), 0.5);
+            if (!onScreen(sqCenter)) continue;
+            const geomAng = Math.atan2(B.y - A.y, B.x - A.x);
+            stamp("square", sqCenter, a, geomAng);
+          }
+
+          const B = lattice(i + 1, j);
+          const C = lattice(i, j + 1);
+          const Dn = lattice(i + 1, j - 1);
+          stampFaceTriangle(A, B, C);
+          stampFaceTriangle(A, B, Dn);
+        }
+      }
+    }
+
+    function drawMixed48_2() {
+      const sin8 = Math.sin(Math.PI / 8);
+      const cos8 = Math.cos(Math.PI / 8);
+      const octR = getUnitForShape("octagon");
+      const edge = 2 * octR * sin8;
+      const pitch = 2 * octR * (cos8 + sin8);
+      const x0 = -pitch;
+      const y0 = -pitch;
+      const x1 = state.vw + pitch;
+      const y1 = state.vh + pitch;
+      const octDesignRots = [0, Math.PI / 2, Math.PI, (3 * Math.PI) / 2];
+
+      for (let y = y0; y <= y1; y += pitch) {
+        for (let x = x0; x <= x1; x += pitch) {
+          const octDesignAng = octDesignRots[Math.floor(rnd() * octDesignRots.length)];
+          stamp("octagon", v(x, y), octR, 0, octDesignAng);
+          stamp("square", v(x + pitch / 2, y), edge, 0);
+          stamp("square", v(x, y + pitch / 2), edge, 0);
+        }
+      }
+    }
+
+    function drawMixed33_434() {
+      const a = Math.max(8 * state.dpr, Math.min(getUnitForShape("square"), getUnitForShape("triangle")));
+      const cacheKey = `${state.vw}:${state.vh}:${state.dpr}:${a.toFixed(3)}`;
+
+      function snapFloat(x) {
+        const s = Math.round(x * 1e6) / 1e6;
+        return Math.abs(s) < 1e-9 ? 0 : s;
+      }
+
+      function pointKeyXY(x, y) {
+        return `${snapFloat(x).toFixed(6)},${snapFloat(y).toFixed(6)}`;
+      }
+
+      function normAngleDeg(degAng) {
+        let aDeg = degAng % 360;
+        if (aDeg < 0) aDeg += 360;
+        return (Math.round(aDeg / 30) * 30) % 360;
+      }
+
+      function edgeKeyByIds(aId, bId) {
+        return aId < bId ? `${aId}|${bId}` : `${bId}|${aId}`;
+      }
+
+      function polyAreaFromIds(faceIds, vertices) {
+        let s = 0;
+        for (let i = 0; i < faceIds.length; i += 1) {
+          const p0 = vertices[faceIds[i]];
+          const p1 = vertices[faceIds[(i + 1) % faceIds.length]];
+          s += p0.x * p1.y - p0.y * p1.x;
+        }
+        return s * 0.5;
+      }
+
+      function buildMixed33434Tiles() {
+        const rootCenter = v(state.vw * 0.5, state.vh * 0.5);
+        const radius = Math.hypot(state.vw, state.vh) * 0.5 / a + 3.5;
+        const dirsByType = {
+          A: [0, 60, 120, 210, 270],
+          B: [0, 90, 150, 240, 300],
+        };
+        const slotMap = [7, 9, 3, 2, 8, 6, 5, 0, 4, 1];
+        const vertices = [];
+        const vertexMap = new Map();
+        const queue = [];
+
+        function addVertex(x, y, type, phi) {
+          const xx = snapFloat(x);
+          const yy = snapFloat(y);
+          const pp = normAngleDeg(phi);
+          const k = pointKeyXY(xx, yy);
+          const existing = vertexMap.get(k);
+          if (existing !== undefined) {
+            const cur = vertices[existing];
+            if (cur.type === type && cur.phi === pp) return existing;
+            return null;
+          }
+          const id = vertices.length;
+          vertices.push({
+            id,
+            x: xx,
+            y: yy,
+            type,
+            phi: pp,
+            nbr: [-1, -1, -1, -1, -1],
+          });
+          vertexMap.set(k, id);
+          queue.push(id);
+          return id;
+        }
+
+        addVertex(0, 0, "A", 0);
+
+        for (let qi = 0; qi < queue.length; qi += 1) {
+          const vid = queue[qi];
+          const vv = vertices[vid];
+          for (let i = 0; i < 5; i += 1) {
+            const slotId = (vv.type === "A" ? 0 : 5) + i;
+            const mapped = slotMap[slotId];
+            const nextType = mapped < 5 ? "A" : "B";
+            const nextSlot = mapped % 5;
+            const edgeDeg = vv.phi + dirsByType[vv.type][i];
+            const nx = vv.x + Math.cos((edgeDeg * Math.PI) / 180);
+            const ny = vv.y + Math.sin((edgeDeg * Math.PI) / 180);
+            if (Math.hypot(nx, ny) > radius) continue;
+            const nextPhi = normAngleDeg(edgeDeg + 180 - dirsByType[nextType][nextSlot]);
+            const nid = addVertex(nx, ny, nextType, nextPhi);
+            if (nid === null) continue;
+            vv.nbr[i] = nid;
+            if (vertices[nid].nbr[nextSlot] === -1) {
+              vertices[nid].nbr[nextSlot] = vid;
+            }
+          }
+        }
+
+        for (const vv of vertices) {
+          for (let i = 0; i < 5; i += 1) {
+            if (vv.nbr[i] !== -1) continue;
+            const slotId = (vv.type === "A" ? 0 : 5) + i;
+            const mapped = slotMap[slotId];
+            const nextType = mapped < 5 ? "A" : "B";
+            const nextSlot = mapped % 5;
+            const edgeDeg = vv.phi + dirsByType[vv.type][i];
+            const nx = vv.x + Math.cos((edgeDeg * Math.PI) / 180);
+            const ny = vv.y + Math.sin((edgeDeg * Math.PI) / 180);
+            const nid = vertexMap.get(pointKeyXY(nx, ny));
+            if (nid === undefined) continue;
+            const nv = vertices[nid];
+            if (nv.type !== nextType) continue;
+            vv.nbr[i] = nid;
+            if (nv.nbr[nextSlot] === -1) nv.nbr[nextSlot] = vv.id;
+          }
+        }
+
+        const edges = [];
+        const edgeSet = new Set();
+        for (const vv of vertices) {
+          for (const nid of vv.nbr) {
+            if (nid < 0) continue;
+            const k = edgeKeyByIds(vv.id, nid);
+            if (edgeSet.has(k)) continue;
+            edgeSet.add(k);
+            edges.push([Math.min(vv.id, nid), Math.max(vv.id, nid)]);
+          }
+        }
+
+        const neighborOrder = vertices.map((vv) => vv.nbr
+          .filter((nid) => nid >= 0)
+          .map((nid) => ({
+            nid,
+            ang: Math.atan2(vertices[nid].y - vv.y, vertices[nid].x - vv.x),
+          }))
+          .sort((a0, b0) => a0.ang - b0.ang)
+          .map((o) => o.nid));
+
+        const usedHalfEdges = new Set();
+        const faces = [];
+
+        function halfKey(aId, bId) {
+          return `${aId}>${bId}`;
+        }
+
+        for (const [aId, bId] of edges) {
+          for (const [u0, v0] of [[aId, bId], [bId, aId]]) {
+            const startKey = halfKey(u0, v0);
+            if (usedHalfEdges.has(startKey)) continue;
+            const face = [];
+            let u = u0;
+            let v0cur = v0;
+            let closed = false;
+            for (let step = 0; step < 96; step += 1) {
+              usedHalfEdges.add(halfKey(u, v0cur));
+              face.push(u);
+              const nbrs = neighborOrder[v0cur];
+              const idx = nbrs.indexOf(u);
+              if (idx < 0) break;
+              const w = nbrs[(idx - 1 + nbrs.length) % nbrs.length];
+              u = v0cur;
+              v0cur = w;
+              if (u === u0 && v0cur === v0) {
+                closed = true;
+                break;
+              }
+            }
+            if (closed) faces.push(face);
+          }
+        }
+
+        const tiles = [];
+        for (const face of faces) {
+          if (face.length !== 3 && face.length !== 4) continue;
+          const area = polyAreaFromIds(face, vertices);
+          if (area <= 1e-7) continue;
+          const center = face.reduce((acc, id) => add(acc, v(vertices[id].x, vertices[id].y)), v(0, 0));
+          center.x /= face.length;
+          center.y /= face.length;
+
+          const p0 = vertices[face[0]];
+          const p1 = vertices[face[1]];
+          const edgeAng = Math.atan2(p1.y - p0.y, p1.x - p0.x);
+
+          if (face.length === 3) {
+            tiles.push({
+              shape: "triangle",
+              center: v(rootCenter.x + center.x * a, rootCenter.y + center.y * a),
+              geomAng: edgeAng - Math.PI / 3,
+            });
+          } else {
+            tiles.push({
+              shape: "square",
+              center: v(rootCenter.x + center.x * a, rootCenter.y + center.y * a),
+              geomAng: edgeAng,
+            });
+          }
+        }
+
+        return tiles;
+      }
+
+      if (!mixed33434Cache || mixed33434Cache.key !== cacheKey) {
+        mixed33434Cache = {
+          key: cacheKey,
+          tiles: buildMixed33434Tiles(),
+        };
+      }
+
+      for (const tile of mixed33434Cache.tiles) {
+        stamp(tile.shape, tile.center, a, tile.geomAng);
+      }
+    }
+
+    if (mode.shapes.length === 1) {
+      drawSingleShapeBackground(mode.shapes[0]);
+    } else if (state.tilingId === "tiling-3464") {
+      drawMixed3464();
+    } else if (state.tilingId === "tiling-48-2") {
+      drawMixed48_2();
+    } else if (state.tilingId === "tiling-33-434") {
+      drawMixed33_434();
+    } else {
+      drawSingleShapeBackground(mode.shapes[0] || "triangle");
     }
 
     function strokeTile(points) {
       pathPoly(points);
       ctx.stroke();
-    }
-
-    const outlineTiles = [];
-    const drawTile = (points, center, ang) => {
-      drawTileAt(points, center, ang);
-      outlineTiles.push(points);
     };
-
-    if (state.tileShape === "triangle") {
-      const S = unit;
-      const H = (S * Math.sqrt(3)) / 2;
-      const x0 = -S;
-      const y0 = -2 * H;
-      const x1 = state.vw + S;
-      const y1 = state.vh + 2 * H;
-
-      for (let y = y0; y <= y1; y += H) {
-        const row = Math.round((y - y0) / H);
-        const xOffset = row % 2 === 0 ? 0 : S / 2;
-        for (let x = x0 + xOffset; x <= x1; x += S) {
-          const up0 = v(x + S / 2, y);
-          const up1 = v(x, y + H);
-          const up2 = v(x + S, y + H);
-          const dn0 = v(x, y + H);
-          const dn1 = v(x + S, y + H);
-          const dn2 = v(x + S / 2, y + 2 * H);
-          drawTile([up0, up1, up2], v((up0.x + up1.x + up2.x) / 3, (up0.y + up1.y + up2.y) / 3), chooseRot(0));
-          drawTile([dn0, dn1, dn2], v((dn0.x + dn1.x + dn2.x) / 3, (dn0.y + dn1.y + dn2.y) / 3), chooseRot(Math.PI));
-        }
-      }
-    } else if (state.tileShape === "square") {
-      const S = unit;
-      for (let y = -S; y <= state.vh + S; y += S) {
-        for (let x = -S; x <= state.vw + S; x += S) {
-          const points = [v(x, y), v(x + S, y), v(x + S, y + S), v(x, y + S)];
-          const center = v(x + S / 2, y + S / 2);
-          drawTile(points, center, chooseRot());
-        }
-      }
-    } else {
-      const s = unit;
-      const w = Math.sqrt(3) * s;
-      const rowH = 1.5 * s;
-      const cols = Math.ceil(state.vw / w) + 8;
-      const rows = Math.ceil(state.vh / rowH) + 8;
-      const cx0 = state.vw * 0.5;
-      const cy0 = state.vh * 0.5;
-      for (let r = -rows; r <= rows; r += 1) {
-        for (let q = -cols; q <= cols; q += 1) {
-          const cx = cx0 + Math.sqrt(3) * s * (q + r / 2);
-          const cy = cy0 + rowH * r;
-          if (cx < -w || cx > state.vw + w || cy < -2 * s || cy > state.vh + 2 * s) continue;
-          const points = [];
-          for (let i = 0; i < 6; i += 1) {
-            const ang = -Math.PI / 2 + (i * TAU) / 6;
-            points.push(v(cx + Math.cos(ang) * s, cy + Math.sin(ang) * s));
-          }
-          drawTile(points, v(cx, cy), chooseRot());
-        }
-      }
-    }
 
     ctx.save();
     ctx.strokeStyle = "#c0c0c0";
@@ -632,66 +1112,69 @@ export function mountDesigner(root) {
     ctx.restore();
   }
 
-  function pathBigTriangle() {
-    const t = state.tri;
-    if (!t || !t.poly?.length) return;
+  function pathPrimaryTile(tile) {
+    if (!tile || !tile.poly?.length) return;
     ctx.beginPath();
-    ctx.moveTo(t.poly[0].x, t.poly[0].y);
-    for (let i = 1; i < t.poly.length; i += 1) {
-      ctx.lineTo(t.poly[i].x, t.poly[i].y);
+    ctx.moveTo(tile.poly[0].x, tile.poly[0].y);
+    for (let i = 1; i < tile.poly.length; i += 1) {
+      ctx.lineTo(tile.poly[i].x, tile.poly[i].y);
     }
     ctx.closePath();
   }
 
-  function clipBigTriangle() {
-    pathBigTriangle();
+  function clipPrimaryTile(tile) {
+    pathPrimaryTile(tile);
     ctx.clip();
   }
 
-  function strokeBigTriangle() {
+  function strokePrimaryTile(tile, isActive = false) {
+    if (!tile) return;
     ctx.save();
-    ctx.strokeStyle = "#777";
-    ctx.lineWidth = 2 * state.dpr;
-    ctx.globalAlpha = 0.95;
-    pathBigTriangle();
+    ctx.strokeStyle = isActive ? "#444" : "#777";
+    ctx.lineWidth = (isActive ? 2.4 : 1.8) * state.dpr;
+    ctx.globalAlpha = isActive ? 0.98 : 0.9;
+    pathPrimaryTile(tile);
     ctx.stroke();
     ctx.restore();
   }
 
-  function fillBigTriangleWhite() {
+  function fillPrimaryTileWhite(tile) {
+    if (!tile) return;
     ctx.save();
     ctx.fillStyle = "#fff";
-    pathBigTriangle();
+    pathPrimaryTile(tile);
     ctx.fill();
     ctx.restore();
   }
 
-  function drawBigTriangleShadow() {
+  function drawPrimaryTileShadow(tile) {
+    if (!tile) return;
     ctx.save();
     ctx.shadowColor = "rgba(0, 0, 0, 0.22)";
     ctx.shadowBlur = 14 * state.dpr;
     ctx.shadowOffsetY = 4 * state.dpr;
     ctx.fillStyle = "#fff";
-    pathBigTriangle();
+    pathPrimaryTile(tile);
     ctx.fill();
     ctx.restore();
   }
 
-  function drawInnerTriGrid() {
+  function drawInnerTriGrid(tile, isActive = false) {
     if (!state.showGrid) return;
-    const t = state.tri;
-    const { step, dy, mode } = state.grid;
+    if (!tile) return;
+    const grid = isActive ? state.grid : computeGridForShape(tile.shape, tile.side);
+    const { step, dy, mode } = grid;
 
     ctx.save();
-    clipBigTriangle();
+    clipPrimaryTile(tile);
     ctx.strokeStyle = "#d0d0d0";
-    ctx.globalAlpha = 0.55;
+    ctx.globalAlpha = isActive ? 0.55 : 0.35;
     ctx.lineWidth = 1 * state.dpr;
 
     function drawLocalLine(p, dir) {
-      const L = t.side * 2;
-      const p0 = localToScreen(add(p, mul(dir, -L)));
-      const p1 = localToScreen(add(p, mul(dir, L)));
+      const L = tile.side * 2;
+      const p0 = localToScreenForTile(tile, add(p, mul(dir, -L)));
+      const p1 = localToScreenForTile(tile, add(p, mul(dir, L)));
       ctx.beginPath();
       ctx.moveTo(p0.x, p0.y);
       ctx.lineTo(p1.x, p1.y);
@@ -702,7 +1185,7 @@ export function mountDesigner(root) {
     const d60 = v(0.5, Math.sqrt(3) / 2);
     const d120 = v(-0.5, Math.sqrt(3) / 2);
 
-    const { minX, minY, maxX, maxY } = t.bounds;
+    const { minX, minY, maxX, maxY } = tile.bounds;
     if (mode === "square") {
       for (let x = Math.floor(minX / step) * step; x <= maxX; x += step) {
         drawLocalLine(v(x, 0), v(0, 1));
@@ -750,44 +1233,45 @@ export function mountDesigner(root) {
     ctx.restore();
   }
 
-  function drawFillsBig() {
-    const t = state.tri;
+  function drawFillsBig(tile, design) {
+    if (!tile || !design) return;
     ctx.save();
-    clipBigTriangle();
-    for (const fill of state.fills) {
-      const f = getFillRenderData(fill);
+    clipPrimaryTile(tile);
+    for (const fill of design.fills) {
+      const f = getFillRenderData(fill, tile, design);
       if (!f) continue;
       ctx.save();
-      ctx.translate(t.center.x, t.center.y);
+      ctx.translate(tile.center.x, tile.center.y);
       ctx.drawImage(f.bmp, f.minX, f.minY, f.wLocal, f.hLocal);
       ctx.restore();
     }
     ctx.restore();
   }
 
-  function drawInkBig(widthPx) {
+  function drawInkBig(tile, design, widthPx) {
+    if (!tile || !design) return;
     ctx.save();
-    clipBigTriangle();
+    clipPrimaryTile(tile);
     ctx.strokeStyle = "#000";
     ctx.lineWidth = widthPx * state.dpr;
     ctx.lineCap = "round";
     ctx.lineJoin = "round";
 
-    for (const o of state.ink) {
+    for (const o of design.ink) {
       if (o.type === "line") {
-        const a = localToScreen(o.a);
-        const b = localToScreen(o.b);
+        const a = localToScreenForTile(tile, o.a);
+        const b = localToScreenForTile(tile, o.b);
         ctx.beginPath();
         ctx.moveTo(a.x, a.y);
         ctx.lineTo(b.x, b.y);
         ctx.stroke();
       } else if (o.type === "circle") {
-        const c = localToScreen(o.c);
+        const c = localToScreenForTile(tile, o.c);
         ctx.beginPath();
         ctx.arc(c.x, c.y, o.r, 0, TAU);
         ctx.stroke();
       } else if (o.type === "arc") {
-        const c = localToScreen(o.c);
+        const c = localToScreenForTile(tile, o.c);
         ctx.beginPath();
         ctx.arc(c.x, c.y, o.r, o.a0, o.a1, false);
         ctx.stroke();
@@ -975,7 +1459,7 @@ export function mountDesigner(root) {
   }
 
   function drawHoverArcHighlight() {
-    if (!state.hoverArcPick) return;
+    if (!state.hoverArcPick || !state.tri) return;
     const a = state.hoverArcPick.arc;
 
     ctx.save();
@@ -984,7 +1468,7 @@ export function mountDesigner(root) {
     ctx.lineWidth = 3 * state.dpr;
     ctx.lineCap = "round";
     ctx.lineJoin = "round";
-    clipBigTriangle();
+    clipPrimaryTile(state.tri);
 
     const c = localToScreen(a.c);
     ctx.beginPath();
@@ -998,18 +1482,30 @@ export function mountDesigner(root) {
     clearScreen();
 
     renderBackgroundTiling();
-    drawBigTriangleShadow();
-    fillBigTriangleWhite();
+    if (!state.primaryTiles.length) return;
+    const tiles = [...state.primaryTiles];
+    tiles.sort((a, b) => (a.shape === state.tileShape ? 1 : 0) - (b.shape === state.tileShape ? 1 : 0));
 
-    drawInnerTriGrid();
+    for (const tile of tiles) {
+      drawPrimaryTileShadow(tile);
+      fillPrimaryTileWhite(tile);
+    }
+    for (const tile of tiles) {
+      drawInnerTriGrid(tile, tile.shape === state.tileShape);
+    }
     drawNearestGridPoint();
 
-    drawInkBig(1);
-    drawFillsBig();
-    drawInkBig(2);
+    for (const tile of tiles) {
+      const design = getShapeDesign(tile.shape);
+      drawInkBig(tile, design, 1);
+      drawFillsBig(tile, design);
+      drawInkBig(tile, design, 2);
+    }
 
     drawHoverArcHighlight();
-    strokeBigTriangle();
+    for (const tile of tiles) {
+      strokePrimaryTile(tile, tile.shape === state.tileShape);
+    }
 
     drawPreviewUnclippedBlue();
   }
@@ -1020,6 +1516,11 @@ export function mountDesigner(root) {
   }
 
   function updateHover(pScreen) {
+    if (!state.tri) {
+      state.hover = null;
+      state.hoverArcPick = null;
+      return;
+    }
     const local = screenToLocal(pScreen);
     const snapLocal = snapToTriGrid(local);
     state.hover = { screen: pScreen, local, snapLocal };
@@ -1035,6 +1536,11 @@ export function mountDesigner(root) {
   function onPointerDown(e) {
     if (state.shapeDialogOpen) return;
     const p = getPointer(e);
+    const hitTile = findPrimaryTileAtScreen(p);
+    if (hitTile && hitTile.shape !== state.tileShape) {
+      setActiveShape(hitTile.shape, false);
+    }
+    if (!state.tri) return;
     canvas.setPointerCapture?.(e.pointerId);
     state.pointerDown = true;
 
@@ -1053,7 +1559,7 @@ export function mountDesigner(root) {
       const fillData = computeFillMaskAtSeed(fill);
       if (fillData) {
         state.fills.push(fill);
-        fillCache.set(fill, { key: getFillCacheKey(), data: fillData });
+        fillCache.set(fill, { key: `${getFillCacheKey()}:${state.tileShape}:${state.tri?.side || 0}`, data: fillData });
       }
       state.pointerDown = false;
       requestRender();
@@ -1073,6 +1579,7 @@ export function mountDesigner(root) {
 
   function onPointerMove(e) {
     if (state.shapeDialogOpen) return;
+    if (!state.tri) return;
     const p = getPointer(e);
     updateHover(p);
 
@@ -1189,15 +1696,19 @@ export function mountDesigner(root) {
     btnShapeClose.setAttribute("aria-hidden", state.shapeDialogRequired ? "true" : "false");
   }
 
-  function setPendingTileShape(shape) {
-    if (!isTileShape(shape)) return;
-    state.pendingTileShape = shape;
+  function setPendingTilingOption(optionId) {
+    if (!isTilingOption(optionId)) return;
+    state.pendingTilingId = optionId;
     for (const option of shapeOptionButtons) {
       if (!(option instanceof HTMLElement)) continue;
-      const selected = option.dataset.shapeOption === shape;
+      const selected = option.dataset.shapeOption === optionId;
       option.classList.toggle("selected", selected);
       option.setAttribute("aria-pressed", selected ? "true" : "false");
     }
+  }
+
+  function createEmptyShapeDesigns() {
+    return Object.fromEntries(SHAPES.map((shape) => [shape, { ink: [], fills: [] }]));
   }
 
   function openShapeDialog(required = false) {
@@ -1205,7 +1716,7 @@ export function mountDesigner(root) {
     state.shapeDialogRequired = required;
     state.pointerDown = false;
     state.drawing = null;
-    setPendingTileShape(state.tileShape);
+    setPendingTilingOption(state.tilingId);
     openMenu(null);
     syncShapeDialog();
     requestRender();
@@ -1217,16 +1728,18 @@ export function mountDesigner(root) {
     syncShapeDialog();
   }
 
-  function applyTileShape(shape) {
-    if (!isTileShape(shape)) return;
-    state.tileShape = shape;
-    state.pendingTileShape = shape;
+  function applyTilingOption(optionId) {
+    if (!isTilingOption(optionId)) return;
+    const mode = getTilingOption(optionId);
+    state.tilingId = optionId;
+    state.pendingTilingId = optionId;
+    state.tileShape = mode.shapes[0] || "triangle";
     state.pointerDown = false;
     state.drawing = null;
     state.hover = null;
     state.hoverArcPick = null;
-    state.ink = [];
-    state.fills = [];
+    state.shapeDesigns = createEmptyShapeDesigns();
+    syncActiveDesignRefs();
     state.undoStack.length = 0;
     state.redoStack.length = 0;
     markInkChanged();
@@ -1236,11 +1749,11 @@ export function mountDesigner(root) {
     requestRender();
   }
 
-  function selectTileShape(shape) {
+  function selectTilingOption(optionId) {
     if (!state.shapeDialogOpen) return;
-    if (!isTileShape(shape)) return;
-    setPendingTileShape(shape);
-    applyTileShape(shape);
+    if (!isTilingOption(optionId)) return;
+    setPendingTilingOption(optionId);
+    applyTilingOption(optionId);
     state.shapeDialogOpen = false;
     state.shapeDialogRequired = false;
     syncShapeDialog();
@@ -1306,8 +1819,14 @@ export function mountDesigner(root) {
 
   function onClear() {
     pushUndo();
-    state.ink = [];
-    state.fills = [];
+    const modeShapes = getTilingOption(state.tilingId).shapes;
+    for (const shape of modeShapes) {
+      const design = getShapeDesign(shape);
+      if (!design) continue;
+      design.ink.length = 0;
+      design.fills.length = 0;
+    }
+    syncActiveDesignRefs();
     markInkChanged();
     requestRender();
   }
@@ -1433,8 +1952,8 @@ export function mountDesigner(root) {
     if (!(target instanceof Element)) return;
     const btn = target.closest("[data-shape-option]");
     if (!(btn instanceof HTMLButtonElement) || !shapeOptionList.contains(btn)) return;
-    const shape = btn.dataset.shapeOption;
-    if (shape) selectTileShape(shape);
+    const optionId = btn.dataset.shapeOption;
+    if (optionId) selectTilingOption(optionId);
   }
 
   function inTextEntryTarget(target) {
@@ -1509,7 +2028,8 @@ export function mountDesigner(root) {
   on(window, "keydown", onKeyDown);
 
   function init() {
-    setPendingTileShape(state.pendingTileShape);
+    syncActiveDesignRefs();
+    setPendingTilingOption(state.pendingTilingId);
     syncShapeDialog();
     syncToolMenu();
     syncGridMenu();

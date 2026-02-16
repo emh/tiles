@@ -73,6 +73,13 @@ function shapeGlyph(shape) {
       h("rect", { x: "18", y: "18", width: "64", height: "64" })
     );
   }
+  if (shape === "octagon") {
+    return h(
+      "svg",
+      { class: "shape-option-glyph", viewBox: "0 0 100 100", "aria-hidden": "true" },
+      h("polygon", { points: "50,10 78,22 90,50 78,78 50,90 22,78 10,50 22,22" })
+    );
+  }
   return h(
     "svg",
     { class: "shape-option-glyph", viewBox: "0 0 100 100", "aria-hidden": "true" },
@@ -80,15 +87,20 @@ function shapeGlyph(shape) {
   );
 }
 
-function shapeOption(props, shape, label) {
+function shapeOption(props, shapes, label) {
   return h(
     "button",
     withClass("shape-option", {
       ...props,
       type: "button",
       "aria-label": label,
+      title: label,
     }),
-    shapeGlyph(shape),
+    h(
+      "span",
+      { class: "shape-option-cluster", "aria-hidden": "true" },
+      ...shapes.map((shape, idx) => h("span", { class: "shape-option-glyph-wrap", key: `${shape}-${idx}` }, shapeGlyph(shape)))
+    ),
     h("span", { class: "sr-only" }, label)
   );
 }
@@ -267,18 +279,33 @@ function App() {
           { id: "shapeOptionList", class: "shape-option-list" },
           shapeOption(
             { "data-shape-option": "triangle", class: "selected", "aria-pressed": "true" },
-            "triangle",
+            ["triangle"],
             "Triangle"
           ),
           shapeOption(
             { "data-shape-option": "square", "aria-pressed": "false" },
-            "square",
+            ["square"],
             "Square"
           ),
           shapeOption(
             { "data-shape-option": "hexagon", "aria-pressed": "false" },
-            "hexagon",
+            ["hexagon"],
             "Hexagon"
+          ),
+          shapeOption(
+            { "data-shape-option": "tiling-3464", "aria-pressed": "false" },
+            ["hexagon", "triangle", "square"],
+            "3.4.6.4"
+          ),
+          shapeOption(
+            { "data-shape-option": "tiling-48-2", "aria-pressed": "false" },
+            ["octagon", "square"],
+            "4,8^2"
+          ),
+          shapeOption(
+            { "data-shape-option": "tiling-33-434", "aria-pressed": "false" },
+            ["square", "triangle"],
+            "3^2,4,3,4"
           )
         )
       )
