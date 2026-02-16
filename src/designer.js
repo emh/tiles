@@ -154,6 +154,7 @@ export function mountDesigner(root) {
 
     hover: null,
     hoverArcPick: null,
+    hoverDeleteInkIndex: -1,
 
     rafPending: false,
   };
@@ -458,6 +459,7 @@ export function mountDesigner(root) {
     clearSelection();
     state.hover = null;
     state.hoverArcPick = null;
+    state.hoverDeleteInkIndex = -1;
     if (shouldRender) requestRender();
   }
 
@@ -2309,7 +2311,12 @@ export function mountDesigner(root) {
 
   function updateHoverPick() {
     state.hoverArcPick = null;
+    state.hoverDeleteInkIndex = -1;
     if (!state.hover) return;
+    if (state.tool === "delete") {
+      state.hoverDeleteInkIndex = findDeletableInkIndex(state.hover.local);
+      return;
+    }
     if (state.tool !== "circle") return;
 
     const p = state.snap && state.tool !== "fill" ? state.hover.snapLocal : state.hover.local;
@@ -2322,6 +2329,43 @@ export function mountDesigner(root) {
     if (!inside) return;
 
     state.hoverArcPick = { arc: quarterArcForPoint(c, r, p) };
+  }
+
+  function drawHoverDeleteHighlight() {
+    if (state.tool !== "delete") return;
+    if (!state.tri) return;
+    const idx = state.hoverDeleteInkIndex;
+    if (idx < 0 || idx >= state.ink.length) return;
+    const o = inkWorldToLocal(state.ink[idx]);
+
+    ctx.save();
+    ctx.strokeStyle = "#2b66ff";
+    ctx.globalAlpha = 0.92;
+    ctx.lineWidth = 3 * state.dpr;
+    ctx.lineCap = "round";
+    ctx.lineJoin = "round";
+    clipPrimaryTile(state.tri);
+
+    if (o.type === "line") {
+      const a = localToScreen(o.a);
+      const b = localToScreen(o.b);
+      ctx.beginPath();
+      ctx.moveTo(a.x, a.y);
+      ctx.lineTo(b.x, b.y);
+      ctx.stroke();
+    } else if (o.type === "circle") {
+      const c = localToScreen(o.c);
+      ctx.beginPath();
+      ctx.arc(c.x, c.y, o.r, 0, TAU);
+      ctx.stroke();
+    } else if (o.type === "arc") {
+      const c = localToScreen(o.c);
+      ctx.beginPath();
+      ctx.arc(c.x, c.y, o.r, o.a0, o.a1, false);
+      ctx.stroke();
+    }
+
+    ctx.restore();
   }
 
   function drawHoverArcHighlight() {
@@ -2371,6 +2415,7 @@ export function mountDesigner(root) {
     }
 
     drawSelectionOverlay(state.tri);
+    drawHoverDeleteHighlight();
     drawHoverArcHighlight();
     for (const tile of tiles) {
       strokePrimaryTile(tile, tile.shape === state.tileShape);
@@ -2388,6 +2433,7 @@ export function mountDesigner(root) {
     if (!state.tri) {
       state.hover = null;
       state.hoverArcPick = null;
+      state.hoverDeleteInkIndex = -1;
       return;
     }
     const local = screenToLocal(pScreen);
@@ -2958,6 +3004,7 @@ export function mountDesigner(root) {
   on(canvas, "pointerleave", () => {
     state.hover = null;
     state.hoverArcPick = null;
+    state.hoverDeleteInkIndex = -1;
     requestRender();
   });
 
