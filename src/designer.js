@@ -12,6 +12,7 @@ export function mountDesigner(root) {
   const menuBar = root.querySelector("#menuBar");
   const menuRoots = [...root.querySelectorAll(".menu-root")];
   const itemNew = root.querySelector("#itemNew");
+  const itemExportTile = root.querySelector("#itemExportTile");
   const itemExportWallpaper = root.querySelector("#itemExportWallpaper");
   const toolSeg = root.querySelector("#toolSeg");
   const itemUndo = root.querySelector("#itemUndo");
@@ -40,6 +41,7 @@ export function mountDesigner(root) {
 
   if (!(menuBar instanceof HTMLElement) ||
       !(itemNew instanceof HTMLElement) ||
+      !(itemExportTile instanceof HTMLElement) ||
       !(itemExportWallpaper instanceof HTMLElement) ||
       !(toolSeg instanceof HTMLElement) ||
       !(itemUndo instanceof HTMLElement) ||
@@ -2880,6 +2882,556 @@ export function mountDesigner(root) {
     link.click();
   }
 
+  function triggerTextDownload(content, filename, mimeType = "text/plain;charset=utf-8") {
+    const blob = new Blob([content], { type: mimeType });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = filename;
+    link.click();
+    setTimeout(() => URL.revokeObjectURL(url), 2000);
+  }
+
+  function fmtSvgNum(n) {
+    const v = Math.abs(n) < 1e-8 ? 0 : n;
+    return Number(v.toFixed(4)).toString();
+  }
+
+  function svgPt(p) {
+    return `${fmtSvgNum(p.x)} ${fmtSvgNum(p.y)}`;
+  }
+
+  function svgPathFromPoly(points) {
+    if (!points?.length) return "";
+    let d = `M ${svgPt(points[0])}`;
+    for (let i = 1; i < points.length; i += 1) d += ` L ${svgPt(points[i])}`;
+    return `${d} Z`;
+  }
+
+  function angleDeltaCCW(a0, a1) {
+    const s = angleWrap(a0);
+    const e = angleWrap(a1);
+    let d = e - s;
+    if (d < 0) d += TAU;
+    return d;
+  }
+
+  function angleDeltaCW(a0, a1) {
+    return angleDeltaCCW(a1, a0);
+  }
+
+  function pointOnCircle(c, r, ang) {
+    return v(c.x + Math.cos(ang) * r, c.y + Math.sin(ang) * r);
+  }
+
+  function svgPathForInkLocal(localInk) {
+    if (!localInk) return "";
+    if (localInk.type === "line") {
+      return `M ${svgPt(localInk.a)} L ${svgPt(localInk.b)}`;
+    }
+    if (localInk.type === "circle") {
+      const p0 = pointOnCircle(localInk.c, localInk.r, 0);
+      const p1 = pointOnCircle(localInk.c, localInk.r, Math.PI);
+      const rr = fmtSvgNum(localInk.r);
+      return `M ${svgPt(p0)} A ${rr} ${rr} 0 1 1 ${svgPt(p1)} A ${rr} ${rr} 0 1 1 ${svgPt(p0)}`;
+    }
+    if (localInk.type === "arc") {
+      const a0 = angleWrap(localInk.a0);
+      const a1 = angleWrap(localInk.a1);
+      const p0 = pointOnCircle(localInk.c, localInk.r, a0);
+      const p1 = pointOnCircle(localInk.c, localInk.r, a1);
+      const d = angleDeltaCCW(a0, a1);
+      if (d <= 1e-6) return "";
+      const largeArc = d > Math.PI ? 1 : 0;
+      const sweep = 1;
+      const rr = fmtSvgNum(localInk.r);
+      return `M ${svgPt(p0)} A ${rr} ${rr} 0 ${largeArc} ${sweep} ${svgPt(p1)}`;
+    }
+    return "";
+  }
+
+  function cross2(a, b) {
+    return a.x * b.y - a.y * b.x;
+  }
+
+  function pointKey(p) {
+    return `${Math.round(p.x * 10000) / 10000},${Math.round(p.y * 10000) / 10000}`;
+  }
+
+  function pushUniqueNumber(arr, value, eps = 1e-6) {
+    for (const v0 of arr) {
+      if (Math.abs(v0 - value) <= eps) return;
+    }
+    arr.push(value);
+  }
+
+  function normalizeAngleList(angles) {
+    const vals = angles.map((a) => angleWrap(a)).sort((a, b) => a - b);
+    const out = [];
+    for (const a of vals) {
+      if (!out.length || Math.abs(a - out[out.length - 1]) > 1e-6) out.push(a);
+    }
+    if (out.length > 1 && Math.abs(out[0] + TAU - out[out.length - 1]) < 1e-6) {
+      out.pop();
+    }
+    return out;
+  }
+
+  function dedupePoints(points, eps = 1e-6) {
+    const out = [];
+    for (const p of points) {
+      if (out.some((q) => len(sub(p, q)) <= eps)) continue;
+      out.push(p);
+    }
+    return out;
+  }
+
+  function lineSegmentIntersection(a0, a1, b0, b1) {
+    const r = sub(a1, a0);
+    const s = sub(b1, b0);
+    const den = cross2(r, s);
+    if (Math.abs(den) < 1e-9) return [];
+    const qp = sub(b0, a0);
+    const t = cross2(qp, s) / den;
+    const u = cross2(qp, r) / den;
+    if (t < -1e-7 || t > 1 + 1e-7 || u < -1e-7 || u > 1 + 1e-7) return [];
+    return [add(a0, mul(r, t))];
+  }
+
+  function lineCircleIntersections(a, b, c, r) {
+    const d = sub(b, a);
+    const f = sub(a, c);
+    const A = dot(d, d);
+    if (A < 1e-10) return [];
+    const B = 2 * dot(f, d);
+    const C = dot(f, f) - r * r;
+    let disc = B * B - 4 * A * C;
+    if (disc < -1e-8) return [];
+    disc = Math.max(0, disc);
+    const sDisc = Math.sqrt(disc);
+    const ts = disc <= 1e-8 ? [(-B) / (2 * A)] : [(-B - sDisc) / (2 * A), (-B + sDisc) / (2 * A)];
+    const pts = [];
+    for (const t of ts) {
+      if (t < -1e-7 || t > 1 + 1e-7) continue;
+      pts.push(add(a, mul(d, t)));
+    }
+    return dedupePoints(pts);
+  }
+
+  function circleCircleIntersections(c0, r0, c1, r1) {
+    const dVec = sub(c1, c0);
+    const d = len(dVec);
+    if (d < 1e-8) return [];
+    if (d > r0 + r1 + 1e-8) return [];
+    if (d < Math.abs(r0 - r1) - 1e-8) return [];
+    const a = (r0 * r0 - r1 * r1 + d * d) / (2 * d);
+    const h2 = r0 * r0 - a * a;
+    if (h2 < -1e-8) return [];
+    const h = Math.sqrt(Math.max(0, h2));
+    const m = add(c0, mul(dVec, a / d));
+    const rx = (-dVec.y * h) / d;
+    const ry = (dVec.x * h) / d;
+    const pA = v(m.x + rx, m.y + ry);
+    if (h <= 1e-8) return [pA];
+    const pB = v(m.x - rx, m.y - ry);
+    return [pA, pB];
+  }
+
+  function primitiveAngleAt(prim, p) {
+    return angleWrap(Math.atan2(p.y - prim.c.y, p.x - prim.c.x));
+  }
+
+  function lineParamAt(a, b, p) {
+    const dx = b.x - a.x;
+    const dy = b.y - a.y;
+    if (Math.abs(dx) >= Math.abs(dy)) return dx ? (p.x - a.x) / dx : 0;
+    return dy ? (p.y - a.y) / dy : 0;
+  }
+
+  function primitiveParamAt(prim, p) {
+    if (prim.kind === "line") return lineParamAt(prim.a, prim.b, p);
+    return primitiveAngleAt(prim, p);
+  }
+
+  function pointOnPrimitive(prim, p) {
+    if (prim.kind === "line") {
+      const d = pointToSegmentDistance(p, prim.a, prim.b);
+      const t = lineParamAt(prim.a, prim.b, p);
+      return d <= 1e-4 && t >= -1e-6 && t <= 1 + 1e-6;
+    }
+    const dr = Math.abs(len(sub(p, prim.c)) - prim.r);
+    if (dr > 1e-4) return false;
+    if (prim.kind === "arc") {
+      const ang = primitiveAngleAt(prim, p);
+      return angleInArc(ang, prim.a0, prim.a1);
+    }
+    return true;
+  }
+
+  function primitiveIntersections(a, b) {
+    let pts = [];
+    if (a.kind === "line" && b.kind === "line") {
+      pts = lineSegmentIntersection(a.a, a.b, b.a, b.b);
+    } else if (a.kind === "line" && (b.kind === "circle" || b.kind === "arc")) {
+      pts = lineCircleIntersections(a.a, a.b, b.c, b.r);
+    } else if (b.kind === "line" && (a.kind === "circle" || a.kind === "arc")) {
+      pts = lineCircleIntersections(b.a, b.b, a.c, a.r);
+    } else {
+      pts = circleCircleIntersections(a.c, a.r, b.c, b.r);
+    }
+    return dedupePoints(pts).filter((p) => pointOnPrimitive(a, p) && pointOnPrimitive(b, p));
+  }
+
+  function makeFillMaskTester(fillData) {
+    if (!fillData?.bmp || !fillData.wLocal || !fillData.hLocal) return () => false;
+    const g = fillData.bmp.getContext("2d", { willReadFrequently: true });
+    if (!g) return () => false;
+    const w = fillData.bmp.width;
+    const h = fillData.bmp.height;
+    const px = g.getImageData(0, 0, w, h).data;
+    return (pLocal) => {
+      if (pLocal.x < fillData.minX || pLocal.y < fillData.minY) return false;
+      if (pLocal.x > fillData.minX + fillData.wLocal || pLocal.y > fillData.minY + fillData.hLocal) return false;
+      const ux = (pLocal.x - fillData.minX) / fillData.wLocal;
+      const uy = (pLocal.y - fillData.minY) / fillData.hLocal;
+      if (ux < 0 || uy < 0 || ux > 1 || uy > 1) return false;
+      const sx = Math.floor(ux * w);
+      const sy = Math.floor(uy * h);
+      if (sx < 0 || sy < 0 || sx >= w || sy >= h) return false;
+      return px[(sy * w + sx) * 4 + 3] > 0;
+    };
+  }
+
+  function boundarySideForEdge(mid, normalLeft, sampleBase, isInsideFill) {
+    const scales = [1, 2, 4];
+    for (const mulS of scales) {
+      const d = sampleBase * mulS;
+      const insideL = isInsideFill(add(mid, mul(normalLeft, d)));
+      const insideR = isInsideFill(add(mid, mul(normalLeft, -d)));
+      if (insideL !== insideR) return insideL ? "left" : "right";
+    }
+    return null;
+  }
+
+  function buildFillBoundarySvgPath(fill, tile, design) {
+    if (!fill || !tile || !design) return "";
+    const fillData = getFillRenderData(fill, tile, design);
+    if (!fillData || !Array.isArray(fill.boundaryInkIds)) return "";
+    const boundaryInk = fillBoundaryInkList(design, fill.boundaryInkIds).map((ink) => inkWorldToLocal(ink, tile));
+    const primitives = [];
+    for (const ink of boundaryInk) {
+      if (ink.type === "line") {
+        if (len(sub(ink.b, ink.a)) > 1e-6) primitives.push({ kind: "line", a: ink.a, b: ink.b });
+      } else if (ink.type === "circle") {
+        if (ink.r > 1e-6) primitives.push({ kind: "circle", c: ink.c, r: ink.r });
+      } else if (ink.type === "arc") {
+        if (ink.r > 1e-6) primitives.push({ kind: "arc", c: ink.c, r: ink.r, a0: angleWrap(ink.a0), a1: angleWrap(ink.a1) });
+      }
+    }
+    if (fill.usesTileBoundary && tile.polyLocal?.length) {
+      for (let i = 0; i < tile.polyLocal.length; i += 1) {
+        const a = tile.polyLocal[i];
+        const b = tile.polyLocal[(i + 1) % tile.polyLocal.length];
+        if (len(sub(b, a)) > 1e-6) primitives.push({ kind: "line", a, b, tileEdge: true });
+      }
+    }
+    if (!primitives.length) return "";
+
+    const splitParams = primitives.map(() => []);
+    for (let i = 0; i < primitives.length; i += 1) {
+      const prim = primitives[i];
+      if (prim.kind === "line") {
+        pushUniqueNumber(splitParams[i], 0);
+        pushUniqueNumber(splitParams[i], 1);
+      } else if (prim.kind === "arc") {
+        pushUniqueNumber(splitParams[i], angleWrap(prim.a0));
+        pushUniqueNumber(splitParams[i], angleWrap(prim.a1));
+      }
+    }
+
+    for (let i = 0; i < primitives.length; i += 1) {
+      for (let j = i + 1; j < primitives.length; j += 1) {
+        const pts = primitiveIntersections(primitives[i], primitives[j]);
+        for (const p of pts) {
+          pushUniqueNumber(splitParams[i], primitiveParamAt(primitives[i], p));
+          pushUniqueNumber(splitParams[j], primitiveParamAt(primitives[j], p));
+        }
+      }
+    }
+
+    const rawEdges = [];
+    for (let i = 0; i < primitives.length; i += 1) {
+      const prim = primitives[i];
+      if (prim.kind === "line") {
+        const ts = [...splitParams[i]].sort((a, b) => a - b)
+          .filter((t, idx, arr) => idx === 0 || Math.abs(t - arr[idx - 1]) > 1e-6);
+        if (!ts.length) continue;
+        if (Math.abs(ts[0]) > 1e-6) ts.unshift(0);
+        if (Math.abs(ts[ts.length - 1] - 1) > 1e-6) ts.push(1);
+        for (let k = 0; k < ts.length - 1; k += 1) {
+          const t0 = clamp(ts[k], 0, 1);
+          const t1 = clamp(ts[k + 1], 0, 1);
+          if (t1 - t0 <= 1e-6) continue;
+          rawEdges.push({
+            kind: "line",
+            p0: add(prim.a, mul(sub(prim.b, prim.a), t0)),
+            p1: add(prim.a, mul(sub(prim.b, prim.a), t1)),
+          });
+        }
+        continue;
+      }
+
+      if (prim.kind === "arc") {
+        const s = angleWrap(prim.a0);
+        const e = angleWrap(prim.a1);
+        const total = angleDeltaCCW(s, e);
+        if (total <= 1e-6) continue;
+        const vals = normalizeAngleList(
+          splitParams[i].filter((a) => angleInArc(a, s, e)).concat([s, e])
+        );
+        const sorted = vals
+          .map((a) => ({ a, p: (() => { let d = a - s; if (d < 0) d += TAU; return d; })() }))
+          .sort((u, v0) => u.p - v0.p);
+        for (let k = 0; k < sorted.length - 1; k += 1) {
+          const a0 = sorted[k].a;
+          const a1 = sorted[k + 1].a;
+          if (angleDeltaCCW(a0, a1) <= 1e-6) continue;
+          rawEdges.push({ kind: "arc", c: prim.c, r: prim.r, a0, a1, dir: 1 });
+        }
+        continue;
+      }
+
+      const vals0 = normalizeAngleList(splitParams[i]);
+      const vals = vals0.length === 0
+        ? [0, Math.PI]
+        : (vals0.length === 1 ? normalizeAngleList([vals0[0], vals0[0] + Math.PI]) : vals0);
+      if (vals.length < 2) continue;
+      for (let k = 0; k < vals.length; k += 1) {
+        const a0 = vals[k];
+        const a1 = k === vals.length - 1 ? vals[0] + TAU : vals[k + 1];
+        if (a1 - a0 <= 1e-6) continue;
+        rawEdges.push({ kind: "arc", c: prim.c, r: prim.r, a0, a1, dir: 1 });
+      }
+    }
+
+    if (!rawEdges.length) return "";
+    const isInsideFill = makeFillMaskTester(fillData);
+    const sampleBase = Math.max(0.8 * state.dpr, tile.side * 0.0025);
+    const edges = [];
+
+    for (const edge of rawEdges) {
+      if (edge.kind === "line") {
+        if (len(sub(edge.p1, edge.p0)) <= 1e-6) continue;
+        const dir = normalizeOr(sub(edge.p1, edge.p0), v(1, 0));
+        const mid = mul(add(edge.p0, edge.p1), 0.5);
+        const normalLeft = v(-dir.y, dir.x);
+        const side = boundarySideForEdge(mid, normalLeft, sampleBase, isInsideFill);
+        if (!side) continue;
+        const start = side === "left" ? edge.p0 : edge.p1;
+        const end = side === "left" ? edge.p1 : edge.p0;
+        const startDir = normalizeOr(sub(end, start), v(1, 0));
+        edges.push({
+          kind: "line",
+          start,
+          end,
+          startDir,
+          endDir: startDir,
+        });
+        continue;
+      }
+
+      const delta = angleDeltaCCW(edge.a0, edge.a1);
+      if (delta <= 1e-6) continue;
+      const midAng = edge.a0 + delta * 0.5;
+      const mid = pointOnCircle(edge.c, edge.r, midAng);
+      const tanCCW = v(-Math.sin(midAng), Math.cos(midAng));
+      const normalLeft = v(-tanCCW.y, tanCCW.x);
+      const side = boundarySideForEdge(mid, normalLeft, sampleBase, isInsideFill);
+      if (!side) continue;
+
+      const dir = side === "left" ? 1 : -1;
+      const aStart = side === "left" ? edge.a0 : edge.a1;
+      const aEnd = side === "left" ? edge.a1 : edge.a0;
+      const start = pointOnCircle(edge.c, edge.r, aStart);
+      const end = pointOnCircle(edge.c, edge.r, aEnd);
+      const startDir = dir === 1
+        ? normalizeOr(v(-Math.sin(aStart), Math.cos(aStart)), v(1, 0))
+        : normalizeOr(v(Math.sin(aStart), -Math.cos(aStart)), v(1, 0));
+      const endDir = dir === 1
+        ? normalizeOr(v(-Math.sin(aEnd), Math.cos(aEnd)), v(1, 0))
+        : normalizeOr(v(Math.sin(aEnd), -Math.cos(aEnd)), v(1, 0));
+      edges.push({
+        kind: "arc",
+        c: edge.c,
+        r: edge.r,
+        a0: aStart,
+        a1: aEnd,
+        dir,
+        start,
+        end,
+        startDir,
+        endDir,
+      });
+    }
+
+    if (!edges.length) return "";
+    const outByNode = new Map();
+    for (let i = 0; i < edges.length; i += 1) {
+      const edge = edges[i];
+      edge.startKey = pointKey(edge.start);
+      edge.endKey = pointKey(edge.end);
+      if (!outByNode.has(edge.startKey)) outByNode.set(edge.startKey, []);
+      outByNode.get(edge.startKey).push(i);
+    }
+
+    const used = new Array(edges.length).fill(false);
+    const loops = [];
+
+    function pickNextEdge(nodeKey, prevDir) {
+      const candidates = (outByNode.get(nodeKey) || []).filter((idx) => !used[idx]);
+      if (!candidates.length) return -1;
+      if (candidates.length === 1) return candidates[0];
+      let bestIdx = -1;
+      let bestTurn = Infinity;
+      for (const idx of candidates) {
+        const dir = edges[idx].startDir;
+        let turn = Math.atan2(cross2(prevDir, dir), dot(prevDir, dir));
+        if (turn < 0) turn += TAU;
+        if (turn < bestTurn) {
+          bestTurn = turn;
+          bestIdx = idx;
+        }
+      }
+      return bestIdx;
+    }
+
+    for (let i = 0; i < edges.length; i += 1) {
+      if (used[i]) continue;
+      const loop = [];
+      let cur = i;
+      const startKey = edges[i].startKey;
+      let closed = false;
+      for (let guard = 0; guard < edges.length + 5; guard += 1) {
+        if (used[cur]) break;
+        const edge = edges[cur];
+        used[cur] = true;
+        loop.push(cur);
+        if (edge.endKey === startKey) {
+          closed = true;
+          break;
+        }
+        const next = pickNextEdge(edge.endKey, edge.endDir);
+        if (next < 0) break;
+        cur = next;
+      }
+      if (closed && loop.length) loops.push(loop);
+    }
+
+    if (!loops.length) return "";
+    const parts = [];
+    for (const loop of loops) {
+      const first = edges[loop[0]];
+      let d = `M ${svgPt(first.start)}`;
+      for (const idx of loop) {
+        const edge = edges[idx];
+        if (edge.kind === "line") {
+          d += ` L ${svgPt(edge.end)}`;
+        } else {
+          const delta = edge.dir === 1 ? angleDeltaCCW(edge.a0, edge.a1) : angleDeltaCW(edge.a0, edge.a1);
+          const largeArc = delta > Math.PI ? 1 : 0;
+          const sweep = edge.dir === 1 ? 1 : 0;
+          const rr = fmtSvgNum(edge.r);
+          d += ` A ${rr} ${rr} 0 ${largeArc} ${sweep} ${svgPt(edge.end)}`;
+        }
+      }
+      d += " Z";
+      parts.push(d);
+    }
+    return parts.join(" ");
+  }
+
+  function exportTileSvg() {
+    if (!state.primaryTiles.length) return;
+    ensureAllInkIds();
+
+    const tiles = [...state.primaryTiles];
+    const pad = 4;
+    let minX = Infinity;
+    let minY = Infinity;
+    let maxX = -Infinity;
+    let maxY = -Infinity;
+    for (const tile of tiles) {
+      if (!tile?.poly?.length) continue;
+      for (const p of tile.poly) {
+        minX = Math.min(minX, p.x);
+        minY = Math.min(minY, p.y);
+        maxX = Math.max(maxX, p.x);
+        maxY = Math.max(maxY, p.y);
+      }
+    }
+    if (!Number.isFinite(minX) || !Number.isFinite(minY) || !Number.isFinite(maxX) || !Number.isFinite(maxY)) return;
+    minX -= pad;
+    minY -= pad;
+    maxX += pad;
+    maxY += pad;
+    const vbW = Math.max(1, maxX - minX);
+    const vbH = Math.max(1, maxY - minY);
+
+    const defs = [];
+    const body = [];
+
+    for (let i = 0; i < tiles.length; i += 1) {
+      const tile = tiles[i];
+      const design = getShapeDesign(tile.shape);
+      if (!design) continue;
+      const tilePath = svgPathFromPoly(tile.polyLocal);
+      if (!tilePath) continue;
+
+      const cx = fmtSvgNum(tile.center.x);
+      const cy = fmtSvgNum(tile.center.y);
+      const clipId = `tileClip${i}`;
+      defs.push(`    <clipPath id="${clipId}">`);
+      defs.push(`      <path d="${tilePath}" transform="translate(${cx} ${cy})"/>`);
+      defs.push("    </clipPath>");
+
+      const fillPaths = [];
+      for (const fill of design.fills) {
+        const d = buildFillBoundarySvgPath(fill, tile, design);
+        if (!d) continue;
+        fillPaths.push(`      <path d="${d}" fill="#000" fill-rule="evenodd"/>`);
+      }
+
+      const inkPaths = [];
+      for (const ink of design.ink) {
+        const localInk = inkWorldToLocal(ink, tile);
+        const d = svgPathForInkLocal(localInk);
+        if (!d) continue;
+        inkPaths.push(`      <path d="${d}" fill="none" stroke="#000" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>`);
+      }
+
+      body.push(`  <g clip-path="url(#${clipId})">`);
+      body.push(`    <g transform="translate(${cx} ${cy})">`);
+      body.push(...fillPaths);
+      body.push(...inkPaths);
+      body.push("    </g>");
+      body.push("  </g>");
+      body.push(`  <path d="${tilePath}" transform="translate(${cx} ${cy})" fill="none" stroke="#bdbdbd" stroke-width="1"/>`);
+    }
+
+    const lines = [
+      `<svg xmlns="http://www.w3.org/2000/svg" viewBox="${fmtSvgNum(minX)} ${fmtSvgNum(minY)} ${fmtSvgNum(vbW)} ${fmtSvgNum(vbH)}">`,
+      "  <defs>",
+      ...defs,
+      "  </defs>",
+      ...body,
+      "</svg>",
+    ];
+
+    const modeId = String(state.tilingId || state.tileShape || "tile").replace(/[^a-z0-9_-]+/gi, "-").toLowerCase();
+    const svg = `${lines.join("\n")}\n`;
+    triggerTextDownload(svg, `tile-designer-${modeId}.svg`, "image/svg+xml;charset=utf-8");
+  }
+
   function exportWallpaper() {
     const fallbackW = Math.max(64, Math.round(state.vw / Math.max(1, state.dpr)));
     const fallbackH = Math.max(64, Math.round(state.vh / Math.max(1, state.dpr)));
@@ -3072,6 +3624,10 @@ export function mountDesigner(root) {
     }
     if (item.dataset.action === "new") {
       openShapeDialog(false);
+      return;
+    }
+    if (item.dataset.action === "export-tile") {
+      exportTileSvg();
       return;
     }
     if (item.dataset.action === "export-wallpaper") {

@@ -137,6 +137,11 @@ function App() {
             { iconName: "file-plus-2" }
           ),
           menuActionItem(
+            { id: "itemExportTile", "data-action": "export-tile", role: "menuitem" },
+            "Export Tile...",
+            { iconName: "file-output" }
+          ),
+          menuActionItem(
             { id: "itemExportWallpaper", "data-action": "export-wallpaper", role: "menuitem" },
             "Export Wallpaper...",
             { iconName: "download" }
