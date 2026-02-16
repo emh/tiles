@@ -12,6 +12,7 @@ export function mountDesigner(root) {
   const menuBar = root.querySelector("#menuBar");
   const menuRoots = [...root.querySelectorAll(".menu-root")];
   const itemNew = root.querySelector("#itemNew");
+  const itemExportWallpaper = root.querySelector("#itemExportWallpaper");
   const toolSeg = root.querySelector("#toolSeg");
   const itemUndo = root.querySelector("#itemUndo");
   const itemRedo = root.querySelector("#itemRedo");
@@ -29,9 +30,17 @@ export function mountDesigner(root) {
   const shapeOptionList = root.querySelector("#shapeOptionList");
   const shapeOptionButtons = [...root.querySelectorAll("[data-shape-option]")];
   const btnShapeClose = root.querySelector("#btnShapeClose");
+  const exportDialogBackdrop = root.querySelector("#exportDialogBackdrop");
+  const exportDialog = root.querySelector("#exportDialog");
+  const exportDialogForm = root.querySelector("#exportDialogForm");
+  const exportWidthInput = root.querySelector("#exportWidthInput");
+  const exportHeightInput = root.querySelector("#exportHeightInput");
+  const btnExportClose = root.querySelector("#btnExportClose");
+  const btnExportCancel = root.querySelector("#btnExportCancel");
 
   if (!(menuBar instanceof HTMLElement) ||
       !(itemNew instanceof HTMLElement) ||
+      !(itemExportWallpaper instanceof HTMLElement) ||
       !(toolSeg instanceof HTMLElement) ||
       !(itemUndo instanceof HTMLElement) ||
       !(itemRedo instanceof HTMLElement) ||
@@ -46,6 +55,13 @@ export function mountDesigner(root) {
       !(shapeDialogBackdrop instanceof HTMLElement) ||
       !(shapeOptionList instanceof HTMLElement) ||
       !(btnShapeClose instanceof HTMLButtonElement) ||
+      !(exportDialogBackdrop instanceof HTMLElement) ||
+      !(exportDialog instanceof HTMLElement) ||
+      !(exportDialogForm instanceof HTMLFormElement) ||
+      !(exportWidthInput instanceof HTMLInputElement) ||
+      !(exportHeightInput instanceof HTMLInputElement) ||
+      !(btnExportClose instanceof HTMLButtonElement) ||
+      !(btnExportCancel instanceof HTMLButtonElement) ||
       !menuRoots.length ||
       !paletteToolButtons.length ||
       !shapeOptionButtons.length ||
@@ -126,6 +142,9 @@ export function mountDesigner(root) {
     pendingTilingId: DEFAULT_TILING,
     shapeDialogOpen: true,
     shapeDialogRequired: true,
+    exportDialogOpen: false,
+    exportWidth: 1920,
+    exportHeight: 1080,
 
     showGrid: false,
     snap: false,
@@ -585,6 +604,32 @@ export function mountDesigner(root) {
     return null;
   }
 
+  function distanceToTileAtScreen(tile, pScreen) {
+    if (!tile) return Infinity;
+    const local = screenToLocalForTile(tile, pScreen);
+    if (pointInTile(local, tile)) return 0;
+    let best = Infinity;
+    for (let i = 0; i < tile.polyLocal.length; i += 1) {
+      const a = tile.polyLocal[i];
+      const b = tile.polyLocal[(i + 1) % tile.polyLocal.length];
+      best = Math.min(best, pointToSegmentDistance(local, a, b));
+    }
+    return best;
+  }
+
+  function findNearestPrimaryTileAtScreen(pScreen) {
+    let bestTile = null;
+    let bestDist = Infinity;
+    for (const tile of state.primaryTiles) {
+      const d = distanceToTileAtScreen(tile, pScreen);
+      if (d < bestDist) {
+        bestDist = d;
+        bestTile = tile;
+      }
+    }
+    return bestTile;
+  }
+
   function requestRender() {
     if (state.rafPending) return;
     state.rafPending = true;
@@ -949,6 +994,35 @@ export function mountDesigner(root) {
       cur = next;
     }
 
+    // Include touched tile-boundary wall pixels to avoid seams when tiling fills in the wallpaper background.
+    if (usesTileBoundary) {
+      let nextCur = cur;
+      for (let it = 0; it < 4; it += 1) {
+        const next = new Uint8Array(nextCur);
+        for (let y = 1; y < h - 1; y += 1) {
+          for (let x = 1; x < w - 1; x += 1) {
+            const vi = y * w + x;
+            if (next[vi]) continue;
+            if (wallCode(x, y) !== TILE_BOUNDARY_CODE) continue;
+            if (
+              nextCur[vi - 1] ||
+              nextCur[vi + 1] ||
+              nextCur[vi - w] ||
+              nextCur[vi + w] ||
+              nextCur[vi - w - 1] ||
+              nextCur[vi - w + 1] ||
+              nextCur[vi + w - 1] ||
+              nextCur[vi + w + 1]
+            ) {
+              next[vi] = 1;
+            }
+          }
+        }
+        nextCur = next;
+      }
+      cur = nextCur;
+    }
+
     const mask = document.createElement("canvas");
     mask.width = w;
     mask.height = h;
@@ -1023,10 +1097,21 @@ export function mountDesigner(root) {
     };
   }
 
-  function renderBackgroundTiling() {
-    if (!state.primaryTiles.length) return;
+  function renderBackgroundTiling(
+    targetCtx = ctx,
+    viewW = state.vw,
+    viewH = state.vh,
+    sourceTiles = state.primaryTiles,
+    renderDpr = state.dpr,
+    drawTileOutlines = true
+  ) {
+    if (!sourceTiles.length) return;
+    const ctx = targetCtx;
+    const vw = viewW;
+    const vh = viewH;
+    const dpr = renderDpr;
     const mode = getTilingOption(state.tilingId);
-    const tileByShape = Object.fromEntries(state.primaryTiles.map((tile) => [tile.shape, tile]));
+    const tileByShape = Object.fromEntries(sourceTiles.map((tile) => [tile.shape, tile]));
     const rnd = mulberry32(BG_SEED >>> 0);
 
     function chooseRot(shape, base = 0) {
@@ -1042,7 +1127,7 @@ export function mountDesigner(root) {
       ctx.closePath();
     }
 
-    function getUnitForShape(shape, fallback = 72 * state.dpr) {
+    function getUnitForShape(shape, fallback = 72 * dpr) {
       const tile = tileByShape[shape];
       if (!tile) return fallback;
       return tile.side * BG_SCALE;
@@ -1053,12 +1138,20 @@ export function mountDesigner(root) {
       const design = getShapeDesign(shape);
       if (!primary || !design) return;
       const points = shapePolyLocal(shape, side).map((p) => add(center, rot(p, geomAng)));
+      const clipPad = 0.9 * dpr;
+      const clipPoints = points.map((p) => {
+        const dv = sub(p, center);
+        const L = len(dv) || 1;
+        return add(center, mul(dv, (L + clipPad) / L));
+      });
 
       ctx.save();
-      pathPoly(points);
+      pathPoly(clipPoints);
       ctx.clip();
 
       const scale = side / primary.side;
+      const prevSmoothing = ctx.imageSmoothingEnabled;
+      ctx.imageSmoothingEnabled = false;
       for (const fill of design.fills) {
         const f = getFillRenderData(fill, primary, design);
         if (!f) continue;
@@ -1069,9 +1162,10 @@ export function mountDesigner(root) {
         ctx.drawImage(f.bmp, f.minX, f.minY, f.wLocal, f.hLocal);
         ctx.restore();
       }
+      ctx.imageSmoothingEnabled = prevSmoothing;
 
       ctx.strokeStyle = "#000";
-      ctx.lineWidth = 2 * state.dpr;
+      ctx.lineWidth = 2 * dpr;
       ctx.lineCap = "round";
       ctx.lineJoin = "round";
       for (const o of design.ink) {
@@ -1107,11 +1201,11 @@ export function mountDesigner(root) {
       return points;
     }
 
-    const outlineTiles = [];
+    const outlineTiles = drawTileOutlines ? [] : null;
 
     function stamp(shape, center, side, geomAng = 0, designAng = chooseRot(shape, geomAng)) {
       const points = drawShapeTile(shape, center, side, geomAng, designAng);
-      if (points?.length) outlineTiles.push(points);
+      if (outlineTiles && points?.length) outlineTiles.push(points);
     }
 
     function lineIntersection(a0, a1, b0, b1) {
@@ -1131,8 +1225,8 @@ export function mountDesigner(root) {
         const H = (S * Math.sqrt(3)) / 2;
         const x0 = -S;
         const y0 = -2 * H;
-        const x1 = state.vw + S;
-        const y1 = state.vh + 2 * H;
+        const x1 = vw + S;
+        const y1 = vh + 2 * H;
 
         for (let y = y0; y <= y1; y += H) {
           const row = Math.round((y - y0) / H);
@@ -1152,8 +1246,8 @@ export function mountDesigner(root) {
       }
       if (shape === "square") {
         const S = unit;
-        for (let y = -S; y <= state.vh + S; y += S) {
-          for (let x = -S; x <= state.vw + S; x += S) {
+        for (let y = -S; y <= vh + S; y += S) {
+          for (let x = -S; x <= vw + S; x += S) {
             stamp("square", v(x + S / 2, y + S / 2), S, 0);
           }
         }
@@ -1163,15 +1257,15 @@ export function mountDesigner(root) {
         const s = unit;
         const w = Math.sqrt(3) * s;
         const rowH = 1.5 * s;
-        const cols = Math.ceil(state.vw / w) + 8;
-        const rows = Math.ceil(state.vh / rowH) + 8;
-        const cx0 = state.vw * 0.5;
-        const cy0 = state.vh * 0.5;
+        const cols = Math.ceil(vw / w) + 8;
+        const rows = Math.ceil(vh / rowH) + 8;
+        const cx0 = vw * 0.5;
+        const cy0 = vh * 0.5;
         for (let r = -rows; r <= rows; r += 1) {
           for (let q = -cols; q <= cols; q += 1) {
             const cx = cx0 + Math.sqrt(3) * s * (q + r / 2);
             const cy = cy0 + rowH * r;
-            if (cx < -w || cx > state.vw + w || cy < -2 * s || cy > state.vh + 2 * s) continue;
+            if (cx < -w || cx > vw + w || cy < -2 * s || cy > vh + 2 * s) continue;
             stamp("hexagon", v(cx, cy), s, 0);
           }
         }
@@ -1179,25 +1273,25 @@ export function mountDesigner(root) {
       }
       const s = unit;
       const step = s * 2.2;
-      for (let y = -step; y <= state.vh + step; y += step) {
-        for (let x = -step; x <= state.vw + step; x += step) {
+      for (let y = -step; y <= vh + step; y += step) {
+        for (let x = -step; x <= vw + step; x += step) {
           stamp("octagon", v(x, y), s, 0);
         }
       }
     }
 
     function drawMixed3464() {
-      const a = Math.max(8 * state.dpr, Math.min(getUnitForShape("hexagon"), getUnitForShape("triangle"), getUnitForShape("square")));
+      const a = Math.max(8 * dpr, Math.min(getUnitForShape("hexagon"), getUnitForShape("triangle"), getUnitForShape("square")));
       const D = a * (Math.sqrt(3) + 1);
       const rowH = D * Math.sqrt(3) / 2;
       const pad = D * 2.6;
-      const origin = v(state.vw * 0.5, state.vh * 0.5);
-      const spanI = Math.ceil((state.vw + 2 * pad) / D) + 6;
-      const spanJ = Math.ceil((state.vh + 2 * pad) / rowH) + 6;
+      const origin = v(vw * 0.5, vh * 0.5);
+      const spanI = Math.ceil((vw + 2 * pad) / D) + 6;
+      const spanJ = Math.ceil((vh + 2 * pad) / rowH) + 6;
 
       const lattice = (i, j) => v(origin.x + i * D + j * D * 0.5, origin.y + j * rowH);
       const onScreen = (p, margin = pad) =>
-        p.x >= -margin && p.x <= state.vw + margin && p.y >= -margin && p.y <= state.vh + margin;
+        p.x >= -margin && p.x <= vw + margin && p.y >= -margin && p.y <= vh + margin;
 
       function inwardSquareEdgeLine(p0, p1, faceCenter) {
         const c = mul(add(p0, p1), 0.5);
@@ -1259,8 +1353,8 @@ export function mountDesigner(root) {
       const pitch = 2 * octR * (cos8 + sin8);
       const x0 = -pitch;
       const y0 = -pitch;
-      const x1 = state.vw + pitch;
-      const y1 = state.vh + pitch;
+      const x1 = vw + pitch;
+      const y1 = vh + pitch;
       const octDesignRots = [0, Math.PI / 2, Math.PI, (3 * Math.PI) / 2];
 
       for (let y = y0; y <= y1; y += pitch) {
@@ -1274,8 +1368,8 @@ export function mountDesigner(root) {
     }
 
     function drawMixed33_434() {
-      const a = Math.max(8 * state.dpr, Math.min(getUnitForShape("square"), getUnitForShape("triangle")));
-      const cacheKey = `${state.vw}:${state.vh}:${state.dpr}:${a.toFixed(3)}`;
+      const a = Math.max(8 * dpr, Math.min(getUnitForShape("square"), getUnitForShape("triangle")));
+      const cacheKey = `${vw}:${vh}:${dpr}:${a.toFixed(3)}`;
 
       function snapFloat(x) {
         const s = Math.round(x * 1e6) / 1e6;
@@ -1307,8 +1401,8 @@ export function mountDesigner(root) {
       }
 
       function buildMixed33434Tiles() {
-        const rootCenter = v(state.vw * 0.5, state.vh * 0.5);
-        const radius = Math.hypot(state.vw, state.vh) * 0.5 / a + 3.5;
+        const rootCenter = v(vw * 0.5, vh * 0.5);
+        const radius = Math.hypot(vw, vh) * 0.5 / a + 3.5;
         const dirsByType = {
           A: [0, 60, 120, 210, 270],
           B: [0, 90, 150, 240, 300],
@@ -1495,17 +1589,18 @@ export function mountDesigner(root) {
       drawSingleShapeBackground(mode.shapes[0] || "triangle");
     }
 
-    function strokeTile(points) {
-      pathPoly(points);
-      ctx.stroke();
-    };
+    if (outlineTiles && outlineTiles.length) {
+      ctx.save();
+      ctx.strokeStyle = "#bdbdbd";
+      ctx.lineWidth = 1 * dpr;
+      ctx.globalAlpha = 0.82;
+      for (const points of outlineTiles) {
+        pathPoly(points);
+        ctx.stroke();
+      }
+      ctx.restore();
+    }
 
-    ctx.save();
-    ctx.strokeStyle = "#c0c0c0";
-    ctx.lineWidth = 1 * state.dpr;
-    ctx.globalAlpha = 0.5;
-    for (const points of outlineTiles) strokeTile(points);
-    ctx.restore();
   }
 
   function pathPrimaryTile(tile) {
@@ -1528,7 +1623,7 @@ export function mountDesigner(root) {
     ctx.save();
     ctx.lineJoin = "round";
     ctx.lineCap = "round";
-    ctx.strokeStyle = isActive ? "#6e6e6e" : "#888";
+    ctx.strokeStyle = "#d0d0d0";
     ctx.lineWidth = 1.25 * state.dpr;
     ctx.globalAlpha = isActive ? 0.96 : 0.86;
     pathPrimaryTile(tile);
@@ -1540,6 +1635,18 @@ export function mountDesigner(root) {
   function fillPrimaryTileWhite(tile) {
     if (!tile) return;
     ctx.save();
+    ctx.fillStyle = "#fff";
+    pathPrimaryTile(tile);
+    ctx.fill();
+    ctx.restore();
+  }
+
+  function drawPrimaryTileShadow(tile, isActive = false) {
+    if (!tile) return;
+    ctx.save();
+    ctx.shadowColor = isActive ? "rgba(0, 0, 0, 0.22)" : "rgba(0, 0, 0, 0.17)";
+    ctx.shadowBlur = (isActive ? 12 : 10) * state.dpr;
+    ctx.shadowOffsetY = 3 * state.dpr;
     ctx.fillStyle = "#fff";
     pathPrimaryTile(tile);
     ctx.fill();
@@ -2388,6 +2495,9 @@ export function mountDesigner(root) {
     tiles.sort((a, b) => (a.shape === state.tileShape ? 1 : 0) - (b.shape === state.tileShape ? 1 : 0));
 
     for (const tile of tiles) {
+      drawPrimaryTileShadow(tile, tile.shape === state.tileShape);
+    }
+    for (const tile of tiles) {
       fillPrimaryTileWhite(tile);
     }
     for (const tile of tiles) {
@@ -2449,7 +2559,7 @@ export function mountDesigner(root) {
   }
 
   function onPointerDown(e) {
-    if (state.shapeDialogOpen) return;
+    if (state.shapeDialogOpen || state.exportDialogOpen) return;
     const p = getPointer(e);
     const hitTile = findPrimaryTileAtScreen(p);
     if (hitTile && hitTile.shape !== state.tileShape) {
@@ -2504,12 +2614,19 @@ export function mountDesigner(root) {
       return;
     }
 
-    state.drawing = { tool: state.tool, startLocal: local, curLocal: local };
+    const startScreen = localToScreen(local);
+    state.drawing = {
+      tool: state.tool,
+      startLocal: local,
+      curLocal: local,
+      startScreen,
+      curScreen: startScreen,
+    };
     requestRender();
   }
 
   function onPointerMove(e) {
-    if (state.shapeDialogOpen) return;
+    if (state.shapeDialogOpen || state.exportDialogOpen) return;
     if (!state.tri) return;
     const p = getPointer(e);
     updateHover(p);
@@ -2520,18 +2637,21 @@ export function mountDesigner(root) {
       } else if (state.drawing) {
         const local = localForToolFromHover(state.drawing.tool);
         state.drawing.curLocal = local;
+        state.drawing.curScreen = localToScreen(local);
       }
     }
     requestRender();
   }
 
   function onPointerUp(e) {
-    if (state.shapeDialogOpen) return;
+    if (state.shapeDialogOpen || state.exportDialogOpen) return;
     if (!state.pointerDown) return;
     state.pointerDown = false;
 
+    let releaseScreen = null;
     if (e && typeof e.clientX === "number" && typeof e.clientY === "number" && state.tri) {
-      updateHover(getPointer(e));
+      releaseScreen = getPointer(e);
+      updateHover(releaseScreen);
     }
 
     if (state.selectionDrag) {
@@ -2550,7 +2670,26 @@ export function mountDesigner(root) {
       return;
     }
 
-    if (state.hover) {
+    if ((d.tool === "line" || d.tool === "circle") && state.tri) {
+      const releaseTile = releaseScreen
+        ? findPrimaryTileAtScreen(releaseScreen) || findNearestPrimaryTileAtScreen(releaseScreen)
+        : null;
+      if (releaseTile && releaseTile.shape !== state.tileShape) {
+        setActiveShape(releaseTile.shape, false);
+      }
+      const targetTile = state.tri;
+      if (targetTile) {
+        const startScreen = d.startScreen || localToScreen(d.startLocal);
+        d.startLocal = screenToLocalForTile(targetTile, startScreen);
+        const endScreen = releaseScreen || d.curScreen || localToScreen(d.curLocal);
+        if (releaseScreen) updateHover(releaseScreen);
+        if (state.hover) {
+          d.curLocal = localForToolFromHover(d.tool);
+        } else {
+          d.curLocal = screenToLocalForTile(targetTile, endScreen);
+        }
+      }
+    } else if (state.hover) {
       d.curLocal = localForToolFromHover(d.tool);
     }
 
@@ -2648,6 +2787,10 @@ export function mountDesigner(root) {
     btnShapeClose.setAttribute("aria-hidden", state.shapeDialogRequired ? "true" : "false");
   }
 
+  function syncExportDialog() {
+    exportDialogBackdrop.classList.toggle("open", state.exportDialogOpen);
+  }
+
   function setPendingTilingOption(optionId) {
     if (!isTilingOption(optionId)) return;
     state.pendingTilingId = optionId;
@@ -2666,11 +2809,14 @@ export function mountDesigner(root) {
   function openShapeDialog(required = false) {
     state.shapeDialogOpen = true;
     state.shapeDialogRequired = required;
+    state.exportDialogOpen = false;
     state.pointerDown = false;
     state.drawing = null;
+    state.selectionDrag = null;
     setPendingTilingOption(state.tilingId);
     openMenu(null);
     syncShapeDialog();
+    syncExportDialog();
     requestRender();
   }
 
@@ -2678,6 +2824,90 @@ export function mountDesigner(root) {
     if (state.shapeDialogRequired) return;
     state.shapeDialogOpen = false;
     syncShapeDialog();
+  }
+
+  function openExportDialog() {
+    state.shapeDialogOpen = false;
+    state.shapeDialogRequired = false;
+    state.exportDialogOpen = true;
+    state.pointerDown = false;
+    state.drawing = null;
+    state.selectionDrag = null;
+    const fallbackW = Math.max(64, Math.round(state.vw / Math.max(1, state.dpr)));
+    const fallbackH = Math.max(64, Math.round(state.vh / Math.max(1, state.dpr)));
+    if (!Number.isFinite(state.exportWidth) || state.exportWidth < 64) state.exportWidth = fallbackW;
+    if (!Number.isFinite(state.exportHeight) || state.exportHeight < 64) state.exportHeight = fallbackH;
+    exportWidthInput.value = String(Math.round(state.exportWidth));
+    exportHeightInput.value = String(Math.round(state.exportHeight));
+    openMenu(null);
+    syncShapeDialog();
+    syncExportDialog();
+    requestAnimationFrame(() => {
+      exportWidthInput.focus();
+      exportWidthInput.select();
+    });
+  }
+
+  function closeExportDialog() {
+    if (!state.exportDialogOpen) return;
+    state.exportDialogOpen = false;
+    syncExportDialog();
+  }
+
+  function parseExportDimension(raw, fallback) {
+    const num = Math.round(Number(raw));
+    if (!Number.isFinite(num)) return fallback;
+    return clamp(num, 64, 12000);
+  }
+
+  function triggerPngDownload(pngCanvas, width, height) {
+    const filename = `tile-designer-wallpaper-${width}x${height}.png`;
+    if (pngCanvas.toBlob) {
+      pngCanvas.toBlob((blob) => {
+        if (!blob) return;
+        const url = URL.createObjectURL(blob);
+        const link = document.createElement("a");
+        link.href = url;
+        link.download = filename;
+        link.click();
+        setTimeout(() => URL.revokeObjectURL(url), 2000);
+      }, "image/png");
+      return;
+    }
+    const link = document.createElement("a");
+    link.href = pngCanvas.toDataURL("image/png");
+    link.download = filename;
+    link.click();
+  }
+
+  function exportWallpaper() {
+    const fallbackW = Math.max(64, Math.round(state.vw / Math.max(1, state.dpr)));
+    const fallbackH = Math.max(64, Math.round(state.vh / Math.max(1, state.dpr)));
+    const width = parseExportDimension(exportWidthInput.value, fallbackW);
+    const height = parseExportDimension(exportHeightInput.value, fallbackH);
+    if (width * height > 96000000) {
+      window.alert("Export size is too large. Please choose a smaller width/height.");
+      return;
+    }
+    state.exportWidth = width;
+    state.exportHeight = height;
+    exportWidthInput.value = String(width);
+    exportHeightInput.value = String(height);
+
+    const exportCanvas = document.createElement("canvas");
+    exportCanvas.width = width;
+    exportCanvas.height = height;
+    const exportCtx = exportCanvas.getContext("2d", { alpha: false });
+    if (!exportCtx) return;
+    exportCtx.fillStyle = "#fff";
+    exportCtx.fillRect(0, 0, width, height);
+
+    const exportTiles = state.primaryTiles.map((tile) =>
+      buildPrimaryTile(tile.shape, tile.side / Math.max(1, state.dpr), v(width * 0.5, height * 0.5))
+    );
+    renderBackgroundTiling(exportCtx, width, height, exportTiles, 1, false);
+    triggerPngDownload(exportCanvas, width, height);
+    closeExportDialog();
   }
 
   function applyTilingOption(optionId) {
@@ -2715,6 +2945,19 @@ export function mountDesigner(root) {
 
   function onShapeDialogCancel() {
     closeShapeDialog();
+  }
+
+  function onExportDialogCancel() {
+    closeExportDialog();
+  }
+
+  function onExportDialogSubmit(e) {
+    e.preventDefault();
+    exportWallpaper();
+  }
+
+  function onExportBackdropPointerDown(e) {
+    if (e.target === exportDialogBackdrop) closeExportDialog();
   }
 
   function setActionDisabled(el, disabled) {
@@ -2831,6 +3074,10 @@ export function mountDesigner(root) {
       openShapeDialog(false);
       return;
     }
+    if (item.dataset.action === "export-wallpaper") {
+      openExportDialog();
+      return;
+    }
     if (item.dataset.action === "undo") {
       onUndo();
       return;
@@ -2936,13 +3183,20 @@ export function mountDesigner(root) {
   }
 
   function onKeyDown(e) {
-    if (inTextEntryTarget(e.target)) return;
+    if (state.exportDialogOpen) {
+      if (e.key === "Escape") {
+        e.preventDefault();
+        closeExportDialog();
+      }
+      return;
+    }
     if (state.shapeDialogOpen) {
       if (e.key === "Escape" && !state.shapeDialogRequired) {
         onShapeDialogCancel();
       }
       return;
     }
+    if (inTextEntryTarget(e.target)) return;
     const key = e.key.toLowerCase();
     if (e.metaKey || e.ctrlKey || e.altKey) return;
     if (key === "1") {
@@ -3004,6 +3258,10 @@ export function mountDesigner(root) {
   on(toolPalette, "click", onPaletteClick);
   on(shapeOptionList, "click", onShapeOptionClick);
   on(btnShapeClose, "click", onShapeDialogCancel);
+  on(exportDialogBackdrop, "pointerdown", onExportBackdropPointerDown);
+  on(exportDialogForm, "submit", onExportDialogSubmit);
+  on(btnExportClose, "click", onExportDialogCancel);
+  on(btnExportCancel, "click", onExportDialogCancel);
   on(window, "pointerdown", onWindowPointerDown);
   on(window, "keydown", onKeyDown);
 
@@ -3011,6 +3269,7 @@ export function mountDesigner(root) {
     syncActiveDesignRefs();
     setPendingTilingOption(state.pendingTilingId);
     syncShapeDialog();
+    syncExportDialog();
     syncToolMenu();
     syncGridMenu();
     syncViewMenu();

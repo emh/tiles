@@ -135,6 +135,11 @@ function App() {
             { id: "itemNew", "data-action": "new", role: "menuitem" },
             "New",
             { iconName: "file-plus-2" }
+          ),
+          menuActionItem(
+            { id: "itemExportWallpaper", "data-action": "export-wallpaper", role: "menuitem" },
+            "Export Wallpaper...",
+            { iconName: "download" }
           )
         )
       ),
@@ -316,6 +321,71 @@ function App() {
             { "data-shape-option": "tiling-33-434", "aria-pressed": "false" },
             ["square", "triangle"],
             "3^2,4,3,4"
+          )
+        )
+      )
+    ),
+    h(
+      "div",
+      { id: "exportDialogBackdrop", class: "export-dialog-backdrop", role: "presentation" },
+      h(
+        "div",
+        {
+          id: "exportDialog",
+          class: "export-dialog",
+          role: "dialog",
+          "aria-modal": "true",
+          "aria-labelledby": "exportDialogTitle",
+        },
+        h(
+          "div",
+          { class: "export-dialog-head" },
+          h("h2", { id: "exportDialogTitle" }, "Export Wallpaper"),
+          h(
+            "button",
+            { id: "btnExportClose", class: "export-dialog-close", type: "button", "aria-label": "Close export dialog" },
+            icon("x")
+          )
+        ),
+        h("p", { class: "export-dialog-copy" }, "Set output size in pixels."),
+        h(
+          "form",
+          { id: "exportDialogForm", class: "export-dialog-form" },
+          h(
+            "label",
+            { class: "export-field" },
+            h("span", { class: "export-field-label" }, "Width"),
+            h("input", {
+              id: "exportWidthInput",
+              class: "export-input",
+              type: "number",
+              min: "64",
+              step: "1",
+              inputMode: "numeric",
+              required: "true",
+              value: "1920",
+            })
+          ),
+          h(
+            "label",
+            { class: "export-field" },
+            h("span", { class: "export-field-label" }, "Height"),
+            h("input", {
+              id: "exportHeightInput",
+              class: "export-input",
+              type: "number",
+              min: "64",
+              step: "1",
+              inputMode: "numeric",
+              required: "true",
+              value: "1080",
+            })
+          ),
+          h(
+            "div",
+            { class: "export-dialog-actions" },
+            h("button", { id: "btnExportCancel", class: "export-btn secondary", type: "button" }, "Cancel"),
+            h("button", { id: "btnExportOk", class: "export-btn primary", type: "submit" }, "OK")
           )
         )
       )
