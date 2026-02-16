@@ -2120,18 +2120,81 @@ export function mountDesigner(root) {
     return add(circle.c, mul(dir, circle.r));
   }
 
-  function getControlPointsForInk(ink, circleRadiusDir = v(1, 0)) {
+  function defaultCircleRadiusDir(circle) {
+    if (!circle) return v(1, 0);
+    return normalizeOr(mul(circle.c, -1), v(1, 0));
+  }
+
+  function dedupeHandlePoints(points, eps = 1e-4) {
+    const out = [];
+    for (const p of points) {
+      if (out.some((q) => len(sub(p, q)) <= eps)) continue;
+      out.push({ x: p.x, y: p.y });
+    }
+    return out;
+  }
+
+  function clipLineSelectionHandles(line, tile = state.tri) {
+    if (!tile?.polyLocal?.length) return { a: line.a, b: line.b };
+    const insideA = pointInTile(line.a, tile);
+    const insideB = pointInTile(line.b, tile);
+    if (insideA && insideB) return { a: line.a, b: line.b };
+
+    const hits = [];
+    for (let i = 0; i < tile.polyLocal.length; i += 1) {
+      const e0 = tile.polyLocal[i];
+      const e1 = tile.polyLocal[(i + 1) % tile.polyLocal.length];
+      const pts = lineSegmentIntersection(line.a, line.b, e0, e1);
+      for (const p of pts) hits.push(p);
+    }
+    const uniqHits = dedupeHandlePoints(hits);
+    if (!uniqHits.length) return { a: line.a, b: line.b };
+
+    const sorted = uniqHits
+      .map((p) => ({ p, t: lineParamAt(line.a, line.b, p) }))
+      .sort((u, w) => u.t - w.t);
+
+    if (!insideA && !insideB) {
+      if (sorted.length >= 2) {
+        return { a: sorted[0].p, b: sorted[sorted.length - 1].p };
+      }
+      return { a: sorted[0].p, b: sorted[0].p };
+    }
+
+    function nearestTo(point) {
+      let best = sorted[0].p;
+      let bestDist = len(sub(best, point));
+      for (let i = 1; i < sorted.length; i += 1) {
+        const cand = sorted[i].p;
+        const d = len(sub(cand, point));
+        if (d < bestDist) {
+          best = cand;
+          bestDist = d;
+        }
+      }
+      return best;
+    }
+
+    return {
+      a: insideA ? line.a : nearestTo(line.a),
+      b: insideB ? line.b : nearestTo(line.b),
+    };
+  }
+
+  function getControlPointsForInk(ink, circleRadiusDir = null, tile = state.tri) {
     if (!ink) return [];
     if (ink.type === "line") {
+      const handles = clipLineSelectionHandles(ink, tile);
       return [
-        { kind: "line-a", point: ink.a },
-        { kind: "line-b", point: ink.b },
+        { kind: "line-a", point: handles.a },
+        { kind: "line-b", point: handles.b },
       ];
     }
     if (ink.type === "circle") {
+      const radiusDir = circleRadiusDir || defaultCircleRadiusDir(ink);
       return [
         { kind: "circle-center", point: ink.c },
-        { kind: "circle-radius", point: circleRadiusHandlePoint(ink, circleRadiusDir) },
+        { kind: "circle-radius", point: circleRadiusHandlePoint(ink, radiusDir) },
       ];
     }
     return [];
@@ -2142,7 +2205,7 @@ export function mountDesigner(root) {
     if (!selected) return null;
     const thresh = 12 * state.dpr;
     let best = null;
-    for (const cp of getControlPointsForInk(selected)) {
+    for (const cp of getControlPointsForInk(selected, null, state.tri)) {
       const d = len(sub(pLocal, cp.point));
       if (d > thresh) continue;
       if (!best || d < best.dist) best = { kind: cp.kind, dist: d };
@@ -2182,7 +2245,7 @@ export function mountDesigner(root) {
       if (i === excludeInkIndex) continue;
       const ink = getSelectableInkLocalAtIndex(i);
       if (!ink) continue;
-      for (const cp of getControlPointsForInk(ink)) {
+      for (const cp of getControlPointsForInk(ink, null, state.tri)) {
         points.push(cp.point);
       }
     }
@@ -2229,7 +2292,7 @@ export function mountDesigner(root) {
     const snapDist = 12 * state.dpr;
 
     if (drag.handle === "move") {
-      const cps = getControlPointsForInk(preview);
+      const cps = getControlPointsForInk(preview, null, state.tri);
       let best = null;
       for (const cp of cps) {
         const hit = findNearestSnapTarget(cp.point, targets, snapDist);
@@ -2398,7 +2461,7 @@ export function mountDesigner(root) {
 
   function drawSelectionControlPoints(tile, ink, activeHandle = null, circleRadiusDir = v(1, 0)) {
     if (!tile || !ink) return;
-    const points = getControlPointsForInk(ink, circleRadiusDir);
+    const points = getControlPointsForInk(ink, circleRadiusDir, tile);
     if (!points.length) return;
     const r = 5 * state.dpr;
     ctx.save();
@@ -2423,7 +2486,8 @@ export function mountDesigner(root) {
     const selected = preview || getSelectedInkLocal();
     if (!selected) return;
     if (preview) drawSelectionInkPreview(tile, preview);
-    const circleRadiusDir = state.selectionDrag?.previewRadiusDir || state.selectionDrag?.radiusDir || v(1, 0);
+    const defaultRadiusDir = selected.type === "circle" ? defaultCircleRadiusDir(selected) : v(1, 0);
+    const circleRadiusDir = state.selectionDrag?.previewRadiusDir || state.selectionDrag?.radiusDir || defaultRadiusDir;
     drawSelectionControlPoints(tile, selected, state.selectionDrag?.handle || null, circleRadiusDir);
   }
 
