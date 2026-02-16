@@ -150,24 +150,34 @@ function App() {
           "div",
           { class: "menu-panel", id: "toolSeg", role: "menu", "aria-label": "Tool menu" },
           menuSelectableItem(
+            { "data-tool": "select", role: "menuitemradio", "aria-checked": "false" },
+            "Select",
+            { iconName: "mouse-pointer-2", hotkey: "1" }
+          ),
+          menuSelectableItem(
             { "data-tool": "line", role: "menuitemradio", "aria-checked": "true", class: "selected" },
             "Line",
-            { iconName: "slash", hotkey: "1" }
+            { iconName: "slash", hotkey: "2" }
           ),
           menuSelectableItem(
             { "data-tool": "circle", role: "menuitemradio", "aria-checked": "false" },
             "Circle",
-            { iconName: "circle", hotkey: "2" }
+            { iconName: "circle", hotkey: "3" }
           ),
           menuSelectableItem(
             { "data-tool": "fill", role: "menuitemradio", "aria-checked": "false" },
             "Fill",
-            { iconName: "paint-bucket", hotkey: "3" }
+            { iconName: "paint-bucket", hotkey: "4" }
           ),
           menuSelectableItem(
             { "data-tool": "delete", role: "menuitemradio", "aria-checked": "false" },
             "Delete",
             { iconName: "eraser", hotkey: "D" }
+          ),
+          h("hr", { class: "menu-sep" }),
+          menuSelectableItem(
+            { id: "itemToolSnap", "data-toggle": "tool-snap", role: "menuitemcheckbox", "aria-checked": "true", class: "selected" },
+            "Snap"
           )
         )
       ),
@@ -212,11 +222,11 @@ function App() {
           "div",
           { class: "menu-panel grid-panel", role: "menu", "aria-label": "Grid menu" },
           menuSelectableItem(
-            { id: "itemGrid", "data-toggle": "grid", role: "menuitemcheckbox", "aria-checked": "true", class: "selected" },
+            { id: "itemGrid", "data-toggle": "grid", role: "menuitemcheckbox", "aria-checked": "false" },
             "Grid on"
           ),
           menuSelectableItem(
-            { id: "itemSnap", "data-toggle": "snap", role: "menuitemcheckbox", "aria-checked": "true", class: "selected" },
+            { id: "itemSnap", "data-toggle": "snap", role: "menuitemcheckbox", "aria-checked": "false" },
             "Snap"
           ),
           h("hr", { class: "menu-sep" }),
@@ -313,9 +323,10 @@ function App() {
     h(
       "aside",
       { id: "toolPalette", class: "tool-palette", "aria-label": "Tool palette" },
-      paletteButton({ "data-tool": "line", class: "selected" }, "slash", "Line (1)"),
-      paletteButton({ "data-tool": "circle" }, "circle", "Circle (2)"),
-      paletteButton({ "data-tool": "fill" }, "paint-bucket", "Fill (3)"),
+      paletteButton({ "data-tool": "select" }, "mouse-pointer-2", "Select (1)"),
+      paletteButton({ "data-tool": "line", class: "selected" }, "slash", "Line (2)"),
+      paletteButton({ "data-tool": "circle" }, "circle", "Circle (3)"),
+      paletteButton({ "data-tool": "fill" }, "paint-bucket", "Fill (4)"),
       paletteButton({ "data-tool": "delete" }, "eraser", "Delete (D)"),
       h("div", { class: "palette-sep" }),
       paletteButton({ id: "palUndo", "data-palette-action": "undo" }, "undo-2", "Undo (Z)"),

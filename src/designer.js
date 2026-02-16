@@ -17,6 +17,7 @@ export function mountDesigner(root) {
   const itemRedo = root.querySelector("#itemRedo");
   const itemClear = root.querySelector("#itemClear");
   const itemGrid = root.querySelector("#itemGrid");
+  const itemToolSnap = root.querySelector("#itemToolSnap");
   const itemSnap = root.querySelector("#itemSnap");
   const itemViewTools = root.querySelector("#itemViewTools");
   const toolPalette = root.querySelector("#toolPalette");
@@ -36,6 +37,7 @@ export function mountDesigner(root) {
       !(itemRedo instanceof HTMLElement) ||
       !(itemClear instanceof HTMLElement) ||
       !(itemGrid instanceof HTMLElement) ||
+      !(itemToolSnap instanceof HTMLElement) ||
       !(itemSnap instanceof HTMLElement) ||
       !(itemViewTools instanceof HTMLElement) ||
       !(toolPalette instanceof HTMLElement) ||
@@ -125,8 +127,9 @@ export function mountDesigner(root) {
     shapeDialogOpen: true,
     shapeDialogRequired: true,
 
-    showGrid: true,
-    snap: true,
+    showGrid: false,
+    snap: false,
+    toolSnap: true,
     gridDivisions: 16,
     showToolsPalette: true,
     grid: null,
@@ -145,6 +148,8 @@ export function mountDesigner(root) {
 
     pointerDown: false,
     drawing: null,
+    selectedInkIndex: -1,
+    selectionDrag: null,
 
     hover: null,
     hoverArcPick: null,
@@ -416,6 +421,7 @@ export function mountDesigner(root) {
     state.tri = tile;
     syncActiveDesignRefs();
     recomputeGrid();
+    clearSelection();
     state.hover = null;
     state.hoverArcPick = null;
     if (shouldRender) requestRender();
@@ -1386,11 +1392,36 @@ export function mountDesigner(root) {
 
   function drawNearestGridPoint() {
     if (!state.hover) return;
-    if (state.tool === "fill" || state.tool === "delete") return;
+    if (state.tool === "fill" || state.tool === "delete" || state.tool === "select") return;
     if (!state.snap) return;
+    if (state.toolSnap && state.hover.toolSnapLocal && (state.tool === "line" || state.tool === "circle")) return;
 
     const p = state.hover.snapLocal;
     if (!pointInPrimaryShape(p)) return;
+    const s = localToScreen(p);
+    const r = 4 * state.dpr;
+
+    ctx.save();
+    ctx.fillStyle = "#2b66ff";
+    ctx.globalAlpha = 0.35;
+    ctx.beginPath();
+    ctx.arc(s.x, s.y, r, 0, TAU);
+    ctx.fill();
+    ctx.strokeStyle = "#2b66ff";
+    ctx.globalAlpha = 0.7;
+    ctx.lineWidth = 1.5 * state.dpr;
+    ctx.beginPath();
+    ctx.arc(s.x, s.y, r, 0, TAU);
+    ctx.stroke();
+    ctx.restore();
+  }
+
+  function drawNearestToolSnapPoint() {
+    if (!state.hover) return;
+    if (!state.toolSnap) return;
+    if (state.tool === "fill" || state.tool === "delete") return;
+    const p = state.hover.toolSnapLocal;
+    if (!p) return;
     const s = localToScreen(p);
     const r = 4 * state.dpr;
 
@@ -1500,6 +1531,378 @@ export function mountDesigner(root) {
     return len(sub(p, proj));
   }
 
+  function isSelectableInkType(type) {
+    return type === "line" || type === "circle";
+  }
+
+  function clearSelection() {
+    state.selectedInkIndex = -1;
+    state.selectionDrag = null;
+  }
+
+  function getSelectableInkLocalAtIndex(index) {
+    if (index < 0 || index >= state.ink.length) return null;
+    const localInk = inkWorldToLocal(state.ink[index]);
+    if (!isSelectableInkType(localInk.type)) return null;
+    return localInk;
+  }
+
+  function getSelectedInkLocal() {
+    return getSelectableInkLocalAtIndex(state.selectedInkIndex);
+  }
+
+  function cloneSelectableInkLocal(ink) {
+    if (!ink) return null;
+    if (ink.type === "line") {
+      return {
+        type: "line",
+        a: { x: ink.a.x, y: ink.a.y },
+        b: { x: ink.b.x, y: ink.b.y },
+      };
+    }
+    if (ink.type === "circle") {
+      return {
+        type: "circle",
+        c: { x: ink.c.x, y: ink.c.y },
+        r: ink.r,
+      };
+    }
+    return null;
+  }
+
+  function normalizeOr(vec, fallback = v(1, 0)) {
+    const l = len(vec);
+    if (l < 1e-6) return { x: fallback.x, y: fallback.y };
+    return v(vec.x / l, vec.y / l);
+  }
+
+  function circleRadiusHandlePoint(circle, dir = v(1, 0)) {
+    return add(circle.c, mul(dir, circle.r));
+  }
+
+  function getControlPointsForInk(ink, circleRadiusDir = v(1, 0)) {
+    if (!ink) return [];
+    if (ink.type === "line") {
+      return [
+        { kind: "line-a", point: ink.a },
+        { kind: "line-b", point: ink.b },
+      ];
+    }
+    if (ink.type === "circle") {
+      return [
+        { kind: "circle-center", point: ink.c },
+        { kind: "circle-radius", point: circleRadiusHandlePoint(ink, circleRadiusDir) },
+      ];
+    }
+    return [];
+  }
+
+  function findSelectionControlHit(pLocal) {
+    const selected = getSelectedInkLocal();
+    if (!selected) return null;
+    const thresh = 12 * state.dpr;
+    let best = null;
+    for (const cp of getControlPointsForInk(selected)) {
+      const d = len(sub(pLocal, cp.point));
+      if (d > thresh) continue;
+      if (!best || d < best.dist) best = { kind: cp.kind, dist: d };
+    }
+    return best?.kind || null;
+  }
+
+  function findSelectableInkHit(pLocal) {
+    const thresh = 10 * state.dpr;
+    let best = null;
+    for (let i = state.ink.length - 1; i >= 0; i -= 1) {
+      const ink = getSelectableInkLocalAtIndex(i);
+      if (!ink) continue;
+      let dist = Infinity;
+      if (ink.type === "line") dist = pointToSegmentDistance(pLocal, ink.a, ink.b);
+      if (ink.type === "circle") dist = Math.abs(len(sub(pLocal, ink.c)) - ink.r);
+      if (dist > thresh) continue;
+      if (!best || dist < best.dist) best = { index: i, inkLocal: ink, dist };
+    }
+    return best;
+  }
+
+  function selectableInkDelta(a, b) {
+    if (!a || !b || a.type !== b.type) return Infinity;
+    if (a.type === "line") {
+      return Math.max(len(sub(a.a, b.a)), len(sub(a.b, b.b)));
+    }
+    if (a.type === "circle") {
+      return Math.max(len(sub(a.c, b.c)), Math.abs(a.r - b.r));
+    }
+    return Infinity;
+  }
+
+  function collectSnapTargets(excludeInkIndex = -1) {
+    const points = [];
+    for (let i = 0; i < state.ink.length; i += 1) {
+      if (i === excludeInkIndex) continue;
+      const ink = getSelectableInkLocalAtIndex(i);
+      if (!ink) continue;
+      for (const cp of getControlPointsForInk(ink)) {
+        points.push(cp.point);
+      }
+    }
+    return points;
+  }
+
+  function findNearestSnapTarget(point, targets, maxDist) {
+    let best = null;
+    for (const target of targets) {
+      const d = len(sub(point, target));
+      if (d > maxDist) continue;
+      if (!best || d < best.dist) best = { point: target, dist: d };
+    }
+    return best;
+  }
+
+  function findHoverToolSnapPoint(pLocal) {
+    if (!state.toolSnap) return null;
+    if (state.tool === "fill" || state.tool === "delete") return null;
+    const excludeInkIndex = state.selectionDrag ? state.selectionDrag.index : -1;
+    const targets = collectSnapTargets(excludeInkIndex);
+    if (!targets.length) return null;
+    const hit = findNearestSnapTarget(pLocal, targets, 12 * state.dpr);
+    if (!hit) return null;
+    return { x: hit.point.x, y: hit.point.y };
+  }
+
+  function translateSelectableInkLocal(ink, delta) {
+    if (!ink) return;
+    if (ink.type === "line") {
+      ink.a = add(ink.a, delta);
+      ink.b = add(ink.b, delta);
+      return;
+    }
+    if (ink.type === "circle") {
+      ink.c = add(ink.c, delta);
+    }
+  }
+
+  function snapSelectionPreviewToControlPoints(drag, preview) {
+    if (!state.toolSnap || !preview) return preview;
+    const targets = collectSnapTargets(drag.index);
+    if (!targets.length) return preview;
+    const snapDist = 12 * state.dpr;
+
+    if (drag.handle === "move") {
+      const cps = getControlPointsForInk(preview);
+      let best = null;
+      for (const cp of cps) {
+        const hit = findNearestSnapTarget(cp.point, targets, snapDist);
+        if (!hit) continue;
+        if (!best || hit.dist < best.dist) best = { from: cp.point, to: hit.point, dist: hit.dist };
+      }
+      if (!best) return preview;
+      const snapped = cloneSelectableInkLocal(preview);
+      if (!snapped) return preview;
+      const delta = sub(best.to, best.from);
+      translateSelectableInkLocal(snapped, delta);
+      return snapped;
+    }
+
+    if (preview.type === "line" && (drag.handle === "line-a" || drag.handle === "line-b")) {
+      const key = drag.handle === "line-a" ? "a" : "b";
+      const hit = findNearestSnapTarget(preview[key], targets, snapDist);
+      if (!hit) return preview;
+      const snapped = cloneSelectableInkLocal(preview);
+      if (!snapped) return preview;
+      snapped[key] = { x: hit.point.x, y: hit.point.y };
+      return snapped;
+    }
+
+    if (preview.type === "circle") {
+      if (drag.handle === "circle-center") {
+        const hit = findNearestSnapTarget(preview.c, targets, snapDist);
+        if (!hit) return preview;
+        const snapped = cloneSelectableInkLocal(preview);
+        if (!snapped) return preview;
+        snapped.c = { x: hit.point.x, y: hit.point.y };
+        return snapped;
+      }
+      if (drag.handle === "circle-radius") {
+        const baseDir = drag.previewRadiusDir || drag.radiusDir || v(1, 0);
+        let snapPoint = null;
+        const hoverPoint = state.hover?.toolSnapLocal;
+        if (hoverPoint) {
+          snapPoint = hoverPoint;
+        } else {
+          const rp = circleRadiusHandlePoint(preview, baseDir);
+          const hit = findNearestSnapTarget(rp, targets, snapDist);
+          if (hit) snapPoint = hit.point;
+        }
+        if (!snapPoint) return preview;
+        const snapped = cloneSelectableInkLocal(preview);
+        if (!snapped) return preview;
+        const radiusVec = sub(snapPoint, snapped.c);
+        snapped.r = Math.max(0.5 * state.dpr, len(radiusVec));
+        drag.previewRadiusDir = normalizeOr(radiusVec, baseDir);
+        return snapped;
+      }
+    }
+
+    return preview;
+  }
+
+  function previewInkFromDrag(drag, pLocal) {
+    const next = cloneSelectableInkLocal(drag.startInkLocal);
+    if (!next) return null;
+    if (drag.handle === "move") {
+      const delta = sub(pLocal, drag.startPointerLocal);
+      if (next.type === "line") {
+        next.a = add(next.a, delta);
+        next.b = add(next.b, delta);
+      } else if (next.type === "circle") {
+        next.c = add(next.c, delta);
+      }
+      return next;
+    }
+
+    if (next.type === "line") {
+      if (drag.handle === "line-a") next.a = { x: pLocal.x, y: pLocal.y };
+      if (drag.handle === "line-b") next.b = { x: pLocal.x, y: pLocal.y };
+      return next;
+    }
+
+    if (next.type === "circle") {
+      if (drag.handle === "circle-center") {
+        next.c = { x: pLocal.x, y: pLocal.y };
+      } else if (drag.handle === "circle-radius") {
+        const radiusVec = sub(pLocal, next.c);
+        next.r = Math.max(0.5 * state.dpr, len(radiusVec));
+        drag.previewRadiusDir = normalizeOr(radiusVec, drag.previewRadiusDir || drag.radiusDir || v(1, 0));
+      }
+      return next;
+    }
+
+    return null;
+  }
+
+  function startSelectionDrag(index, handle, inkLocal, pLocal) {
+    const startInkLocal = cloneSelectableInkLocal(inkLocal);
+    if (!startInkLocal) return false;
+    const drag = {
+      index,
+      handle,
+      startInkLocal,
+      previewInkLocal: cloneSelectableInkLocal(startInkLocal),
+      startPointerLocal: { x: pLocal.x, y: pLocal.y },
+      moved: false,
+    };
+    if (startInkLocal.type === "circle" && handle === "circle-radius") {
+      const radiusDir = normalizeOr(sub(pLocal, startInkLocal.c), v(1, 0));
+      drag.radiusDir = radiusDir;
+      drag.previewRadiusDir = radiusDir;
+    }
+    state.selectionDrag = drag;
+    return true;
+  }
+
+  function updateSelectionDrag(pLocal) {
+    if (!state.selectionDrag) return;
+    const basePreview = previewInkFromDrag(state.selectionDrag, pLocal);
+    const preview = snapSelectionPreviewToControlPoints(state.selectionDrag, basePreview);
+    if (!preview) return;
+    state.selectionDrag.previewInkLocal = preview;
+    state.selectionDrag.moved = selectableInkDelta(state.selectionDrag.startInkLocal, preview) > 0.25 * state.dpr;
+  }
+
+  function commitSelectionDrag() {
+    const drag = state.selectionDrag;
+    if (!drag || !drag.moved || !drag.previewInkLocal) return;
+    if (drag.index < 0 || drag.index >= state.ink.length) return;
+    if (!getSelectableInkLocalAtIndex(drag.index)) return;
+    pushUndo();
+    const prevFillSignatures = captureFillSignatures();
+    state.ink[drag.index] = inkLocalToWorld(drag.previewInkLocal);
+    markInkChanged();
+    pruneFillsAfterInkDelete(prevFillSignatures);
+    state.selectedInkIndex = drag.index;
+    updateHoverPick();
+  }
+
+  function drawSelectionInkPreview(tile, ink) {
+    if (!tile || !ink) return;
+    ctx.save();
+    clipPrimaryTile(tile);
+    ctx.strokeStyle = "#2b66ff";
+    ctx.lineWidth = 2 * state.dpr;
+    ctx.globalAlpha = 0.95;
+    ctx.setLineDash([7 * state.dpr, 5 * state.dpr]);
+    ctx.lineCap = "round";
+    ctx.lineJoin = "round";
+    if (ink.type === "line") {
+      const a = localToScreenForTile(tile, ink.a);
+      const b = localToScreenForTile(tile, ink.b);
+      ctx.beginPath();
+      ctx.moveTo(a.x, a.y);
+      ctx.lineTo(b.x, b.y);
+      ctx.stroke();
+    } else if (ink.type === "circle") {
+      const c = localToScreenForTile(tile, ink.c);
+      ctx.beginPath();
+      ctx.arc(c.x, c.y, ink.r, 0, TAU);
+      ctx.stroke();
+    }
+    ctx.restore();
+  }
+
+  function drawSelectionControlPoints(tile, ink, activeHandle = null, circleRadiusDir = v(1, 0)) {
+    if (!tile || !ink) return;
+    const points = getControlPointsForInk(ink, circleRadiusDir);
+    if (!points.length) return;
+    const r = 5 * state.dpr;
+    ctx.save();
+    for (const cp of points) {
+      const s = localToScreenForTile(tile, cp.point);
+      const active = cp.kind === activeHandle;
+      ctx.beginPath();
+      ctx.arc(s.x, s.y, r, 0, TAU);
+      ctx.fillStyle = active ? "#2b66ff" : "#fff";
+      ctx.fill();
+      ctx.strokeStyle = "#2b66ff";
+      ctx.lineWidth = 2 * state.dpr;
+      ctx.stroke();
+    }
+    ctx.restore();
+  }
+
+  function drawSelectionOverlay(tile) {
+    if (state.tool !== "select") return;
+    if (!tile || tile !== state.tri) return;
+    const preview = state.selectionDrag?.previewInkLocal || null;
+    const selected = preview || getSelectedInkLocal();
+    if (!selected) return;
+    if (preview) drawSelectionInkPreview(tile, preview);
+    const circleRadiusDir = state.selectionDrag?.previewRadiusDir || state.selectionDrag?.radiusDir || v(1, 0);
+    drawSelectionControlPoints(tile, selected, state.selectionDrag?.handle || null, circleRadiusDir);
+  }
+
+  function onSelectPointerDown(local) {
+    if (!pointInPrimaryShape(local)) {
+      clearSelection();
+      return false;
+    }
+
+    const controlHit = findSelectionControlHit(local);
+    if (controlHit) {
+      const selected = getSelectedInkLocal();
+      if (!selected) return false;
+      return startSelectionDrag(state.selectedInkIndex, controlHit, selected, local);
+    }
+
+    const inkHit = findSelectableInkHit(local);
+    if (!inkHit) {
+      clearSelection();
+      return false;
+    }
+    state.selectedInkIndex = inkHit.index;
+    return startSelectionDrag(inkHit.index, "move", inkHit.inkLocal, local);
+  }
+
   function angleInArc(ang, a0, a1) {
     const aa = angleWrap(ang);
     const s = angleWrap(a0);
@@ -1580,6 +1983,11 @@ export function mountDesigner(root) {
       pushUndo();
       const prevFillSignatures = captureFillSignatures();
       state.ink.splice(inkIdx, 1);
+      if (state.selectedInkIndex === inkIdx) {
+        clearSelection();
+      } else if (state.selectedInkIndex > inkIdx) {
+        state.selectedInkIndex -= 1;
+      }
       markInkChanged();
       pruneFillsAfterInkDelete(prevFillSignatures);
       updateHoverPick();
@@ -1673,6 +2081,7 @@ export function mountDesigner(root) {
       drawGridCenterMarker(tile, tile.shape === state.tileShape);
     }
     drawNearestGridPoint();
+    drawNearestToolSnapPoint();
 
     for (const tile of tiles) {
       const design = getShapeDesign(tile.shape);
@@ -1681,6 +2090,7 @@ export function mountDesigner(root) {
       drawInkBig(tile, design, 2);
     }
 
+    drawSelectionOverlay(state.tri);
     drawHoverArcHighlight();
     for (const tile of tiles) {
       strokePrimaryTile(tile, tile.shape === state.tileShape);
@@ -1702,14 +2112,24 @@ export function mountDesigner(root) {
     }
     const local = screenToLocal(pScreen);
     const snapLocal = snapToTriGrid(local);
-    state.hover = { screen: pScreen, local, snapLocal };
+    const toolSnapLocal = findHoverToolSnapPoint(local);
+    state.hover = { screen: pScreen, local, snapLocal, toolSnapLocal };
     updateHoverPick();
   }
 
   function shouldSnapForTool(tool) {
     if (!state.snap) return false;
-    if (tool === "fill" || tool === "delete") return false;
+    if (tool === "fill" || tool === "delete" || tool === "select") return false;
     return true;
+  }
+
+  function localForToolFromHover(tool) {
+    const doGridSnap = shouldSnapForTool(tool);
+    const baseLocal = doGridSnap ? state.hover.snapLocal : state.hover.local;
+    if (state.toolSnap && state.hover.toolSnapLocal && (tool === "line" || tool === "circle")) {
+      return state.hover.toolSnapLocal;
+    }
+    return baseLocal;
   }
 
   function onPointerDown(e) {
@@ -1725,8 +2145,15 @@ export function mountDesigner(root) {
 
     updateHover(p);
 
-    const doSnap = shouldSnapForTool(state.tool);
-    const local = doSnap ? state.hover.snapLocal : state.hover.local;
+    const local = localForToolFromHover(state.tool);
+
+    if (state.tool === "select") {
+      const dragStarted = onSelectPointerDown(local);
+      if (!dragStarted) state.pointerDown = false;
+      state.drawing = null;
+      requestRender();
+      return;
+    }
 
     if (state.tool === "fill") {
       if (!pointInPrimaryShape(local)) {
@@ -1762,18 +2189,33 @@ export function mountDesigner(root) {
     const p = getPointer(e);
     updateHover(p);
 
-    if (state.pointerDown && state.drawing) {
-      const doSnap = shouldSnapForTool(state.drawing.tool);
-      const local = doSnap ? state.hover.snapLocal : state.hover.local;
-      state.drawing.curLocal = local;
+    if (state.pointerDown) {
+      if (state.selectionDrag) {
+        updateSelectionDrag(state.hover.local);
+      } else if (state.drawing) {
+        const local = localForToolFromHover(state.drawing.tool);
+        state.drawing.curLocal = local;
+      }
     }
     requestRender();
   }
 
-  function onPointerUp() {
+  function onPointerUp(e) {
     if (state.shapeDialogOpen) return;
     if (!state.pointerDown) return;
     state.pointerDown = false;
+
+    if (e && typeof e.clientX === "number" && typeof e.clientY === "number" && state.tri) {
+      updateHover(getPointer(e));
+    }
+
+    if (state.selectionDrag) {
+      if (state.hover) updateSelectionDrag(state.hover.local);
+      commitSelectionDrag();
+      state.selectionDrag = null;
+      requestRender();
+      return;
+    }
 
     const d = state.drawing;
     state.drawing = null;
@@ -1781,6 +2223,10 @@ export function mountDesigner(root) {
     if (!d) {
       requestRender();
       return;
+    }
+
+    if (state.hover) {
+      d.curLocal = localForToolFromHover(d.tool);
     }
 
     if (d.tool === "circle") {
@@ -1827,6 +2273,7 @@ export function mountDesigner(root) {
     syncToolPalette();
     state.pointerDown = false;
     state.drawing = null;
+    state.selectionDrag = null;
     updateHoverPick();
     requestRender();
   }
@@ -1843,6 +2290,7 @@ export function mountDesigner(root) {
       if (!(item instanceof HTMLElement)) return;
       setSelectableState(item, item.dataset.tool === state.tool);
     });
+    setSelectableState(itemToolSnap, state.toolSnap);
   }
 
   function syncGridMenu() {
@@ -1915,6 +2363,7 @@ export function mountDesigner(root) {
     state.tileShape = mode.shapes[0] || "triangle";
     state.pointerDown = false;
     state.drawing = null;
+    clearSelection();
     state.hover = null;
     state.hoverArcPick = null;
     state.shapeDesigns = createEmptyShapeDesigns();
@@ -1983,6 +2432,12 @@ export function mountDesigner(root) {
     requestRender();
   }
 
+  function onToolSnapToggle() {
+    state.toolSnap = !state.toolSnap;
+    syncToolMenu();
+    requestRender();
+  }
+
   function onGridSizeChange(divisions) {
     let next = GRID_DIVISION_OPTIONS[0];
     let bestErr = Infinity;
@@ -2014,6 +2469,7 @@ export function mountDesigner(root) {
       design.ink.length = 0;
       design.fills.length = 0;
     }
+    clearSelection();
     syncActiveDesignRefs();
     markInkChanged();
     requestRender();
@@ -2067,6 +2523,10 @@ export function mountDesigner(root) {
     }
     if (item.dataset.toggle === "snap") {
       onSnapToggle();
+      return;
+    }
+    if (item.dataset.toggle === "tool-snap") {
+      onToolSnapToggle();
       return;
     }
     if (item.dataset.toggle === "view-tools") {
@@ -2160,14 +2620,18 @@ export function mountDesigner(root) {
     const key = e.key.toLowerCase();
     if (e.metaKey || e.ctrlKey || e.altKey) return;
     if (key === "1") {
-      setTool("line");
+      setTool("select");
       return;
     }
     if (key === "2") {
-      setTool("circle");
+      setTool("line");
       return;
     }
     if (key === "3") {
+      setTool("circle");
+      return;
+    }
+    if (key === "4") {
       setTool("fill");
       return;
     }
@@ -2191,6 +2655,7 @@ export function mountDesigner(root) {
       openMenu(null);
       state.pointerDown = false;
       state.drawing = null;
+      state.selectionDrag = null;
       requestRender();
     }
   }
