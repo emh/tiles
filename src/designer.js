@@ -1526,29 +1526,20 @@ export function mountDesigner(root) {
   function strokePrimaryTile(tile, isActive = false) {
     if (!tile) return;
     ctx.save();
-    ctx.strokeStyle = isActive ? "#444" : "#777";
-    ctx.lineWidth = (isActive ? 2.4 : 1.8) * state.dpr;
-    ctx.globalAlpha = isActive ? 0.98 : 0.9;
+    ctx.lineJoin = "round";
+    ctx.lineCap = "round";
+    ctx.strokeStyle = isActive ? "#6e6e6e" : "#888";
+    ctx.lineWidth = 1.25 * state.dpr;
+    ctx.globalAlpha = isActive ? 0.96 : 0.86;
     pathPrimaryTile(tile);
     ctx.stroke();
+
     ctx.restore();
   }
 
   function fillPrimaryTileWhite(tile) {
     if (!tile) return;
     ctx.save();
-    ctx.fillStyle = "#fff";
-    pathPrimaryTile(tile);
-    ctx.fill();
-    ctx.restore();
-  }
-
-  function drawPrimaryTileShadow(tile) {
-    if (!tile) return;
-    ctx.save();
-    ctx.shadowColor = "rgba(0, 0, 0, 0.22)";
-    ctx.shadowBlur = 14 * state.dpr;
-    ctx.shadowOffsetY = 4 * state.dpr;
     ctx.fillStyle = "#fff";
     pathPrimaryTile(tile);
     ctx.fill();
@@ -2397,7 +2388,6 @@ export function mountDesigner(root) {
     tiles.sort((a, b) => (a.shape === state.tileShape ? 1 : 0) - (b.shape === state.tileShape ? 1 : 0));
 
     for (const tile of tiles) {
-      drawPrimaryTileShadow(tile);
       fillPrimaryTileWhite(tile);
     }
     for (const tile of tiles) {
