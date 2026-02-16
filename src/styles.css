@@ -56,7 +56,7 @@ canvas {
   position: absolute;
   top: calc(100% + 6px);
   left: 0;
-  min-width: 244px;
+  min-width: 252px;
   display: none;
   flex-direction: column;
   gap: 2px;
@@ -78,12 +78,14 @@ canvas {
   align-items: center;
   gap: 8px;
   width: 100%;
+  min-width: 0;
   box-sizing: border-box;
   padding: 7px 8px;
   border-radius: 7px;
   color: #111;
   cursor: default;
   white-space: nowrap;
+  overflow: hidden;
 }
 
 #menuBar .menu-item:hover,
@@ -136,14 +138,18 @@ canvas {
 }
 
 #menuBar .menu-label {
-  flex: 0 1 auto;
+  flex: 1 1 auto;
+  min-width: 0;
 }
 
 #menuBar .menu-hotkey {
+  flex: 0 0 auto;
   margin-left: auto;
+  padding-left: 14px;
   color: #757575;
   font-size: 11px;
   letter-spacing: 0.04em;
+  text-align: right;
 }
 
 #menuBar .menu-item:hover .menu-hotkey,
@@ -233,4 +239,137 @@ canvas {
   height: 1px;
   background: #e8e8e8;
   margin: 3px 0;
+}
+
+.shape-dialog-backdrop {
+  position: fixed;
+  inset: 0;
+  display: none;
+  align-items: center;
+  justify-content: center;
+  background: rgba(248, 248, 248, 0.72);
+  backdrop-filter: blur(3px);
+  z-index: 40;
+}
+
+.shape-dialog-backdrop.open {
+  display: flex;
+}
+
+.shape-dialog {
+  width: min(390px, calc(100vw - 28px));
+  padding: 14px;
+  border: 1px solid #d4d4d4;
+  border-radius: 12px;
+  background: #fff;
+  box-shadow: 0 22px 56px rgba(0, 0, 0, 0.16);
+  font: 13px/1.3 system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif;
+  color: #131313;
+}
+
+.shape-dialog-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.shape-dialog h2 {
+  margin: 0;
+  font-size: 18px;
+  font-weight: 650;
+}
+
+.shape-dialog-copy {
+  margin: 8px 0 10px;
+  color: #5e5e5e;
+}
+
+.shape-dialog-close {
+  width: 24px;
+  height: 24px;
+  padding: 0;
+  display: grid;
+  place-items: center;
+  border: 1px solid #cecece;
+  border-radius: 6px;
+  background: #fff;
+  color: #111;
+  cursor: pointer;
+}
+
+.shape-dialog-close.hidden {
+  display: none;
+}
+
+.shape-dialog-close .menu-icon {
+  width: 14px;
+  height: 14px;
+}
+
+.shape-dialog-close:hover {
+  border-color: #111;
+  background: #111;
+}
+
+.shape-dialog-close:hover .menu-icon {
+  filter: brightness(0) invert(1);
+}
+
+.shape-option-list {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.shape-option {
+  width: 100%;
+  height: 82px;
+  position: relative;
+  padding: 0;
+  display: grid;
+  place-items: center;
+  border: 1px solid #d7d7d7;
+  border-radius: 9px;
+  background: #fff;
+  cursor: pointer;
+  color: #111;
+}
+
+.shape-option:hover {
+  background: #f7f7f7;
+}
+
+.shape-option.selected {
+  border-color: #111;
+  background: #111;
+  color: #fff;
+}
+
+.shape-option:focus-visible {
+  outline: 2px solid #2b66ff;
+  outline-offset: 2px;
+}
+
+.shape-option-glyph {
+  width: 48px;
+  height: 48px;
+  stroke: currentColor;
+  fill: none;
+  stroke-width: 8;
+  stroke-linejoin: round;
+  stroke-linecap: round;
+  pointer-events: none;
+}
+
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
 }

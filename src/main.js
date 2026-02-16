@@ -58,6 +58,41 @@ function paletteButton(props, iconName, label) {
   );
 }
 
+function shapeGlyph(shape) {
+  if (shape === "triangle") {
+    return h(
+      "svg",
+      { class: "shape-option-glyph", viewBox: "0 0 100 100", "aria-hidden": "true" },
+      h("polygon", { points: "50,12 12,88 88,88" })
+    );
+  }
+  if (shape === "square") {
+    return h(
+      "svg",
+      { class: "shape-option-glyph", viewBox: "0 0 100 100", "aria-hidden": "true" },
+      h("rect", { x: "18", y: "18", width: "64", height: "64" })
+    );
+  }
+  return h(
+    "svg",
+    { class: "shape-option-glyph", viewBox: "0 0 100 100", "aria-hidden": "true" },
+    h("polygon", { points: "50,10 82,28 82,72 50,90 18,72 18,28" })
+  );
+}
+
+function shapeOption(props, shape, label) {
+  return h(
+    "button",
+    withClass("shape-option", {
+      ...props,
+      type: "button",
+      "aria-label": label,
+    }),
+    shapeGlyph(shape),
+    h("span", { class: "sr-only" }, label)
+  );
+}
+
 function App() {
   const rootRef = useRef(null);
 
@@ -73,6 +108,24 @@ function App() {
     h(
       "header",
       { id: "menuBar", role: "menubar", "aria-label": "Application menu" },
+      h(
+        "div",
+        { class: "menu-root", "data-menu": "file" },
+        h(
+          "div",
+          { class: "menu-trigger", "data-menu-trigger": "file", role: "menuitem", tabIndex: 0, "aria-haspopup": "true" },
+          "File"
+        ),
+        h(
+          "div",
+          { class: "menu-panel", role: "menu", "aria-label": "File menu" },
+          menuActionItem(
+            { id: "itemNew", "data-action": "new", role: "menuitem" },
+            "New",
+            { iconName: "file-plus-2" }
+          )
+        )
+      ),
       h(
         "div",
         { class: "menu-root", "data-menu": "tool" },
@@ -192,6 +245,40 @@ function App() {
           menuSelectableItem(
             { id: "itemViewTools", "data-toggle": "view-tools", role: "menuitemcheckbox", "aria-checked": "true", class: "selected" },
             "Tools"
+          )
+        )
+      )
+    ),
+    h(
+      "div",
+      { id: "shapeDialogBackdrop", class: "shape-dialog-backdrop open", role: "presentation" },
+      h(
+        "div",
+        { id: "shapeDialog", class: "shape-dialog", role: "dialog", "aria-modal": "true", "aria-labelledby": "shapeDialogTitle" },
+        h(
+          "div",
+          { class: "shape-dialog-head" },
+          h("h2", { id: "shapeDialogTitle" }, "Tile Designer"),
+          h("button", { id: "btnShapeClose", class: "shape-dialog-close", type: "button", "aria-label": "Close shape picker" }, icon("x"))
+        ),
+        h("p", { class: "shape-dialog-copy" }, "Pick your tile shape"),
+        h(
+          "div",
+          { id: "shapeOptionList", class: "shape-option-list" },
+          shapeOption(
+            { "data-shape-option": "triangle", class: "selected", "aria-pressed": "true" },
+            "triangle",
+            "Triangle"
+          ),
+          shapeOption(
+            { "data-shape-option": "square", "aria-pressed": "false" },
+            "square",
+            "Square"
+          ),
+          shapeOption(
+            { "data-shape-option": "hexagon", "aria-pressed": "false" },
+            "hexagon",
+            "Hexagon"
           )
         )
       )
