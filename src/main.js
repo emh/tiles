@@ -137,6 +137,17 @@ function App() {
             { iconName: "file-plus-2" }
           ),
           menuActionItem(
+            { id: "itemLoad", "data-action": "load", role: "menuitem" },
+            "Load...",
+            { iconName: "folder-open" }
+          ),
+          menuActionItem(
+            { id: "itemSave", "data-action": "save", role: "menuitem" },
+            "Save...",
+            { iconName: "save" }
+          ),
+          h("hr", { class: "menu-sep" }),
+          menuActionItem(
             { id: "itemExportTile", "data-action": "export-tile", role: "menuitem" },
             "Export Tile...",
             { iconName: "file-output" }
@@ -406,7 +417,15 @@ function App() {
       h("div", { class: "palette-sep" }),
       paletteButton({ id: "palUndo", "data-palette-action": "undo" }, "undo-2", "Undo (Z)"),
       paletteButton({ id: "palRedo", "data-palette-action": "redo" }, "redo-2", "Redo (Y)")
-    )
+    ),
+    h("input", {
+      id: "loadFileInput",
+      type: "file",
+      accept: "application/json,.json",
+      class: "sr-only",
+      tabIndex: -1,
+      "aria-hidden": "true",
+    })
   );
 }
 

@@ -12,6 +12,8 @@ export function mountDesigner(root) {
   const menuBar = root.querySelector("#menuBar");
   const menuRoots = [...root.querySelectorAll(".menu-root")];
   const itemNew = root.querySelector("#itemNew");
+  const itemLoad = root.querySelector("#itemLoad");
+  const itemSave = root.querySelector("#itemSave");
   const itemExportTile = root.querySelector("#itemExportTile");
   const itemExportWallpaper = root.querySelector("#itemExportWallpaper");
   const toolSeg = root.querySelector("#toolSeg");
@@ -38,9 +40,12 @@ export function mountDesigner(root) {
   const exportHeightInput = root.querySelector("#exportHeightInput");
   const btnExportClose = root.querySelector("#btnExportClose");
   const btnExportCancel = root.querySelector("#btnExportCancel");
+  const loadFileInput = root.querySelector("#loadFileInput");
 
   if (!(menuBar instanceof HTMLElement) ||
       !(itemNew instanceof HTMLElement) ||
+      !(itemLoad instanceof HTMLElement) ||
+      !(itemSave instanceof HTMLElement) ||
       !(itemExportTile instanceof HTMLElement) ||
       !(itemExportWallpaper instanceof HTMLElement) ||
       !(toolSeg instanceof HTMLElement) ||
@@ -64,6 +69,7 @@ export function mountDesigner(root) {
       !(exportHeightInput instanceof HTMLInputElement) ||
       !(btnExportClose instanceof HTMLButtonElement) ||
       !(btnExportCancel instanceof HTMLButtonElement) ||
+      !(loadFileInput instanceof HTMLInputElement) ||
       !menuRoots.length ||
       !paletteToolButtons.length ||
       !shapeOptionButtons.length ||
@@ -97,6 +103,7 @@ export function mountDesigner(root) {
   };
   const BG_SCALE = 0.165;
   const BG_SEED = 1337;
+  const SAVE_DOC_VERSION = 1;
 
   const v = (x, y) => ({ x, y });
   const add = (a, b) => v(a.x + b.x, a.y + b.y);
@@ -257,6 +264,179 @@ export function mountDesigner(root) {
     return {
       ink: design.ink.map((o) => JSON.parse(JSON.stringify(o))),
       fills: design.fills.map(cloneFill),
+    };
+  }
+
+  function isRecord(value) {
+    return !!value && typeof value === "object" && !Array.isArray(value);
+  }
+
+  function toFiniteNumber(value) {
+    const n = Number(value);
+    return Number.isFinite(n) ? n : null;
+  }
+
+  function toInkId(value) {
+    const n = Number(value);
+    return Number.isInteger(n) && n > 0 ? n : null;
+  }
+
+  function sanitizePoint(rawPoint) {
+    if (!isRecord(rawPoint)) return null;
+    const x = toFiniteNumber(rawPoint.x);
+    const y = toFiniteNumber(rawPoint.y);
+    if (x === null || y === null) return null;
+    return v(x, y);
+  }
+
+  function sanitizeInkEntry(rawInk) {
+    if (!isRecord(rawInk)) return null;
+    const type = rawInk.type;
+    if (type === "line") {
+      const a = sanitizePoint(rawInk.a);
+      const b = sanitizePoint(rawInk.b);
+      if (!a || !b) return null;
+      const out = { type: "line", a, b };
+      const id = toInkId(rawInk.id);
+      if (id !== null) out.id = id;
+      return out;
+    }
+    if (type === "circle") {
+      const c = sanitizePoint(rawInk.c);
+      const r = toFiniteNumber(rawInk.r);
+      if (!c || r === null || r <= 0) return null;
+      const out = { type: "circle", c, r };
+      const id = toInkId(rawInk.id);
+      if (id !== null) out.id = id;
+      return out;
+    }
+    if (type === "arc") {
+      const c = sanitizePoint(rawInk.c);
+      const r = toFiniteNumber(rawInk.r);
+      const a0 = toFiniteNumber(rawInk.a0);
+      const a1 = toFiniteNumber(rawInk.a1);
+      if (!c || r === null || r <= 0 || a0 === null || a1 === null) return null;
+      const out = { type: "arc", c, r, a0, a1 };
+      const id = toInkId(rawInk.id);
+      if (id !== null) out.id = id;
+      return out;
+    }
+    return null;
+  }
+
+  function allocateInkId(localIds, globalIds, nextRef) {
+    let id = Math.max(1, Math.trunc(Number(nextRef.value) || 1));
+    while (localIds.has(id) || globalIds.has(id)) id += 1;
+    nextRef.value = id + 1;
+    return id;
+  }
+
+  function sanitizeFillEntry(rawFill, validInkIds, idMap) {
+    if (!isRecord(rawFill)) return null;
+    const x = toFiniteNumber(rawFill.x);
+    const y = toFiniteNumber(rawFill.y);
+    if (x === null || y === null) return null;
+    const out = { x, y };
+    if (Array.isArray(rawFill.boundaryInkIds)) {
+      const ids = [];
+      for (const rawId of rawFill.boundaryInkIds) {
+        const id = toInkId(rawId);
+        if (id === null) continue;
+        const mapped = idMap.get(id) ?? id;
+        if (!validInkIds.has(mapped)) continue;
+        if (ids.includes(mapped)) continue;
+        ids.push(mapped);
+      }
+      out.boundaryInkIds = ids;
+    }
+    if (rawFill.usesTileBoundary === true) out.usesTileBoundary = true;
+    return out;
+  }
+
+  function sanitizeDesignEntry(rawDesign, globalInkIds, nextInkIdRef) {
+    const empty = { ink: [], fills: [] };
+    if (!isRecord(rawDesign)) return empty;
+    const localInkIds = new Set();
+    const idMap = new Map();
+    const inks = [];
+    const rawInk = Array.isArray(rawDesign.ink) ? rawDesign.ink : [];
+
+    for (const raw of rawInk) {
+      const ink = sanitizeInkEntry(raw);
+      if (!ink) continue;
+      const oldId = isValidInkId(ink.id) ? ink.id : null;
+      let nextId = oldId;
+      if (!isValidInkId(nextId) || localInkIds.has(nextId) || globalInkIds.has(nextId)) {
+        nextId = allocateInkId(localInkIds, globalInkIds, nextInkIdRef);
+      } else if (nextId >= nextInkIdRef.value) {
+        nextInkIdRef.value = nextId + 1;
+      }
+      ink.id = nextId;
+      if (oldId !== null && !idMap.has(oldId)) idMap.set(oldId, nextId);
+      localInkIds.add(nextId);
+      globalInkIds.add(nextId);
+      inks.push(ink);
+    }
+
+    const validInkIds = new Set(inks.map((ink) => ink.id));
+    const fills = [];
+    const rawFills = Array.isArray(rawDesign.fills) ? rawDesign.fills : [];
+    for (const rawFill of rawFills) {
+      const fill = sanitizeFillEntry(rawFill, validInkIds, idMap);
+      if (fill) fills.push(fill);
+    }
+
+    return { ink: inks, fills };
+  }
+
+  function sanitizeLoadedDocument(rawDoc) {
+    if (!isRecord(rawDoc)) return null;
+    const tilingId = isTilingOption(rawDoc.tilingId) ? rawDoc.tilingId : DEFAULT_TILING;
+    const modeShapes = getTilingOption(tilingId).shapes;
+    const shapeDesigns = createEmptyShapeDesigns();
+    const globalInkIds = new Set();
+    const nextInkIdRef = { value: 1 };
+
+    let rawDesigns = isRecord(rawDoc.designs) ? rawDoc.designs : null;
+    if (!rawDesigns && isRecord(rawDoc.shapeDesigns)) rawDesigns = rawDoc.shapeDesigns;
+    if (!rawDesigns) {
+      rawDesigns = {};
+      const fallbackShape = modeShapes.includes(rawDoc.tileShape) ? rawDoc.tileShape : modeShapes[0];
+      if (Array.isArray(rawDoc.ink) || Array.isArray(rawDoc.fills)) {
+        rawDesigns[fallbackShape] = {
+          ink: Array.isArray(rawDoc.ink) ? rawDoc.ink : [],
+          fills: Array.isArray(rawDoc.fills) ? rawDoc.fills : [],
+        };
+      }
+    }
+
+    for (const shape of modeShapes) {
+      shapeDesigns[shape] = sanitizeDesignEntry(rawDesigns[shape], globalInkIds, nextInkIdRef);
+    }
+
+    const tileShape = modeShapes.includes(rawDoc.tileShape) ? rawDoc.tileShape : modeShapes[0];
+    return {
+      tilingId,
+      tileShape,
+      shapeDesigns,
+      nextInkId: Math.max(1, nextInkIdRef.value),
+    };
+  }
+
+  function createSaveDocument() {
+    ensureAllInkIds();
+    const shapes = getTilingOption(state.tilingId).shapes;
+    const designs = {};
+    for (const shape of shapes) {
+      const design = getShapeDesign(shape) || { ink: [], fills: [] };
+      designs[shape] = cloneDesign(design);
+    }
+    return {
+      app: "tile-designer",
+      version: SAVE_DOC_VERSION,
+      tilingId: state.tilingId,
+      tileShape: state.tileShape,
+      designs,
     };
   }
 
@@ -2892,6 +3072,72 @@ export function mountDesigner(root) {
     setTimeout(() => URL.revokeObjectURL(url), 2000);
   }
 
+  function applyLoadedDocument(rawDoc) {
+    const loaded = sanitizeLoadedDocument(rawDoc);
+    if (!loaded) throw new Error("Invalid tile design JSON.");
+
+    state.tilingId = loaded.tilingId;
+    state.pendingTilingId = loaded.tilingId;
+    state.tileShape = loaded.tileShape;
+    state.shapeDesigns = loaded.shapeDesigns;
+    state.nextInkId = loaded.nextInkId;
+    state.pointerDown = false;
+    state.drawing = null;
+    state.selectionDrag = null;
+    clearSelection();
+    state.hover = null;
+    state.hoverArcPick = null;
+    state.hoverDeleteInkIndex = -1;
+    state.shapeDialogOpen = false;
+    state.shapeDialogRequired = false;
+    state.exportDialogOpen = false;
+    state.undoStack.length = 0;
+    state.redoStack.length = 0;
+    openMenu(null);
+
+    recomputeBigTriangle();
+    recomputeGrid();
+    markInkChanged();
+
+    setPendingTilingOption(state.tilingId);
+    syncShapeDialog();
+    syncExportDialog();
+    syncToolMenu();
+    syncGridMenu();
+    syncViewMenu();
+    syncToolPalette();
+    syncHUD();
+    updateHoverPick();
+    requestRender();
+  }
+
+  function saveDesignJson() {
+    const doc = createSaveDocument();
+    const modeId = String(doc.tilingId || doc.tileShape || "tile").replace(/[^a-z0-9_-]+/gi, "-").toLowerCase();
+    const json = `${JSON.stringify(doc, null, 2)}\n`;
+    triggerTextDownload(json, `tile-designer-${modeId}.json`, "application/json;charset=utf-8");
+  }
+
+  function openLoadDialog() {
+    loadFileInput.value = "";
+    loadFileInput.click();
+  }
+
+  async function onLoadFileChange(e) {
+    const target = e.target;
+    if (!(target instanceof HTMLInputElement)) return;
+    const file = target.files?.[0];
+    target.value = "";
+    if (!file) return;
+    try {
+      const content = await file.text();
+      const parsed = JSON.parse(content);
+      applyLoadedDocument(parsed);
+    } catch {
+      window.alert("Unable to load this file. Please choose a valid Tile Designer JSON export.");
+    }
+  }
+
   function fmtSvgNum(n) {
     const v = Math.abs(n) < 1e-8 ? 0 : n;
     return Number(v.toFixed(4)).toString();
@@ -3626,6 +3872,14 @@ export function mountDesigner(root) {
       openShapeDialog(false);
       return;
     }
+    if (item.dataset.action === "load") {
+      openLoadDialog();
+      return;
+    }
+    if (item.dataset.action === "save") {
+      saveDesignJson();
+      return;
+    }
     if (item.dataset.action === "export-tile") {
       exportTileSvg();
       return;
@@ -3818,6 +4072,7 @@ export function mountDesigner(root) {
   on(exportDialogForm, "submit", onExportDialogSubmit);
   on(btnExportClose, "click", onExportDialogCancel);
   on(btnExportCancel, "click", onExportDialogCancel);
+  on(loadFileInput, "change", onLoadFileChange);
   on(window, "pointerdown", onWindowPointerDown);
   on(window, "keydown", onKeyDown);
 
