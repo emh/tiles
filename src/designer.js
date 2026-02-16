@@ -2492,16 +2492,16 @@ export function mountDesigner(root) {
   }
 
   function onSelectPointerDown(local) {
-    if (!pointInPrimaryShape(local)) {
-      clearSelection();
-      return false;
-    }
-
     const controlHit = findSelectionControlHit(local);
     if (controlHit) {
       const selected = getSelectedInkLocal();
       if (!selected) return false;
       return startSelectionDrag(state.selectedInkIndex, controlHit, selected, local);
+    }
+
+    if (!pointInPrimaryShape(local)) {
+      clearSelection();
+      return false;
     }
 
     const inkHit = findSelectableInkHit(local);
