@@ -103,7 +103,12 @@ export function mountDesigner(root) {
   };
   const BG_SCALE = 0.165;
   const BG_SEED = 1337;
-  const SAVE_DOC_VERSION = 1;
+  const SAVE_DOC_VERSION = 2;
+  const TILESET_CONTROL_BUTTON_SIZE_PX = 30;
+  const TILESET_CONTROL_BUTTON_RADIUS_PX = 7;
+  const TILESET_CONTROL_PANEL_PADDING_PX = 7;
+  const TILESET_CONTROL_PANEL_RADIUS_PX = 10;
+  const TILESET_CONTROL_GAP_PX = 18;
 
   const v = (x, y) => ({ x, y });
   const add = (a, b) => v(a.x + b.x, a.y + b.y);
@@ -141,6 +146,10 @@ export function mountDesigner(root) {
     return inside;
   }
 
+  function createEmptyDesign() {
+    return { ink: [], fills: [] };
+  }
+
   const state = {
     dpr: 1,
     vw: 0,
@@ -164,7 +173,10 @@ export function mountDesigner(root) {
 
     primaryTiles: [],
     tri: null,
-    shapeDesigns: Object.fromEntries(SHAPES.map((shape) => [shape, { ink: [], fills: [] }])),
+    activePrimaryTileId: null,
+    nextPrimaryTileId: 2,
+    singleTileVariants: [{ id: 1, design: createEmptyDesign() }],
+    shapeDesigns: Object.fromEntries(SHAPES.map((shape) => [shape, createEmptyDesign()])),
 
     ink: [],
     fills: [],
@@ -181,6 +193,7 @@ export function mountDesigner(root) {
     selectionDrag: null,
 
     hover: null,
+    hoverTileControl: null,
     hoverArcPick: null,
     hoverDeleteInkIndex: -1,
 
@@ -216,6 +229,39 @@ export function mountDesigner(root) {
     return state.shapeDesigns[shape];
   }
 
+  function isSingleShapeLayout(tilingId = state.tilingId) {
+    return getTilingOption(tilingId).shapes.length === 1;
+  }
+
+  function getSingleTileVariantById(id) {
+    return state.singleTileVariants.find((variant) => variant.id === id) || null;
+  }
+
+  function cloneSingleTileVariants(variants = state.singleTileVariants) {
+    return variants.map((variant) => ({
+      id: variant.id,
+      design: cloneDesign(variant.design || createEmptyDesign()),
+    }));
+  }
+
+  function ensureSingleTileVariants(minCount = 1) {
+    if (!Array.isArray(state.singleTileVariants)) state.singleTileVariants = [];
+    while (state.singleTileVariants.length < minCount) {
+      const id = state.nextPrimaryTileId++;
+      state.singleTileVariants.push({ id, design: createEmptyDesign() });
+    }
+  }
+
+  function getDesignForTile(tile) {
+    if (!tile) return null;
+    if (!isSingleShapeLayout()) return getShapeDesign(tile.shape);
+    return getSingleTileVariantById(tile.id)?.design || null;
+  }
+
+  function getActiveDesign() {
+    return getDesignForTile(state.tri) || getShapeDesign(state.tileShape) || createEmptyDesign();
+  }
+
   function isValidInkId(id) {
     return Number.isInteger(id) && id > 0;
   }
@@ -236,6 +282,9 @@ export function mountDesigner(root) {
     for (const shape of SHAPES) {
       ensureDesignInkIds(getShapeDesign(shape));
     }
+    for (const variant of state.singleTileVariants) {
+      ensureDesignInkIds(variant.design);
+    }
   }
 
   function createInk(ink) {
@@ -247,8 +296,7 @@ export function mountDesigner(root) {
 
   function syncActiveDesignRefs() {
     ensureAllInkIds();
-    const design = getShapeDesign(state.tileShape);
-    if (!design) return;
+    const design = getActiveDesign();
     state.ink = design.ink;
     state.fills = design.fills;
   }
@@ -415,10 +463,36 @@ export function mountDesigner(root) {
     }
 
     const tileShape = modeShapes.includes(rawDoc.tileShape) ? rawDoc.tileShape : modeShapes[0];
+    let singleTileVariants = [{ id: 1, design: cloneDesign(shapeDesigns[tileShape] || createEmptyDesign()) }];
+    let activePrimaryTileId = 1;
+    let nextPrimaryTileId = 2;
+
+    if (modeShapes.length === 1) {
+      const rawSingleTiles = Array.isArray(rawDoc.singleTiles) ? rawDoc.singleTiles : [];
+      const parsedSingles = [];
+      for (const rawEntry of rawSingleTiles) {
+        const rawDesign = isRecord(rawEntry) && isRecord(rawEntry.design) ? rawEntry.design : rawEntry;
+        parsedSingles.push(sanitizeDesignEntry(rawDesign, globalInkIds, nextInkIdRef));
+      }
+      if (parsedSingles.length) {
+        singleTileVariants = parsedSingles.map((design, idx) => ({ id: idx + 1, design }));
+      }
+      nextPrimaryTileId = singleTileVariants.length + 1;
+      const activeIdxRaw = Number(rawDoc.activeSingleTileIndex);
+      const activeIdx = Number.isInteger(activeIdxRaw)
+        ? clamp(activeIdxRaw, 0, singleTileVariants.length - 1)
+        : 0;
+      activePrimaryTileId = singleTileVariants[activeIdx]?.id || 1;
+      shapeDesigns[tileShape] = cloneDesign(singleTileVariants[0]?.design || createEmptyDesign());
+    }
+
     return {
       tilingId,
       tileShape,
       shapeDesigns,
+      singleTileVariants,
+      activePrimaryTileId,
+      nextPrimaryTileId,
       nextInkId: Math.max(1, nextInkIdRef.value),
     };
   }
@@ -427,8 +501,26 @@ export function mountDesigner(root) {
     ensureAllInkIds();
     const shapes = getTilingOption(state.tilingId).shapes;
     const designs = {};
+    const singleLayout = shapes.length === 1;
+
+    if (singleLayout) {
+      const baseShape = shapes[0] || state.tileShape;
+      const variants = cloneSingleTileVariants();
+      const firstDesign = variants[0]?.design || createEmptyDesign();
+      designs[baseShape] = cloneDesign(firstDesign);
+      return {
+        app: "tile-designer",
+        version: SAVE_DOC_VERSION,
+        tilingId: state.tilingId,
+        tileShape: state.tileShape,
+        designs,
+        singleTiles: variants.map((variant) => cloneDesign(variant.design)),
+        activeSingleTileIndex: Math.max(0, variants.findIndex((variant) => variant.id === state.activePrimaryTileId)),
+      };
+    }
+
     for (const shape of shapes) {
-      const design = getShapeDesign(shape) || { ink: [], fills: [] };
+      const design = getShapeDesign(shape) || createEmptyDesign();
       designs[shape] = cloneDesign(design);
     }
     return {
@@ -447,6 +539,9 @@ export function mountDesigner(root) {
     }
     return {
       tileShape: state.tileShape,
+      activePrimaryTileId: state.activePrimaryTileId,
+      nextPrimaryTileId: state.nextPrimaryTileId,
+      singleTileVariants: cloneSingleTileVariants(),
       designs,
     };
   }
@@ -461,12 +556,27 @@ export function mountDesigner(root) {
   function restoreSnap(snap) {
     const nextDesigns = Object.fromEntries(
       SHAPES.map((shape) => {
-        const design = snap.designs?.[shape] || { ink: [], fills: [] };
+        const design = snap.designs?.[shape] || createEmptyDesign();
         return [shape, cloneDesign(design)];
       })
     );
     state.shapeDesigns = nextDesigns;
-    setActiveShape(snap.tileShape, false);
+    state.singleTileVariants = Array.isArray(snap.singleTileVariants) && snap.singleTileVariants.length
+      ? cloneSingleTileVariants(snap.singleTileVariants)
+      : [{ id: 1, design: cloneDesign(nextDesigns[snap.tileShape] || createEmptyDesign()) }];
+    let maxVariantId = 0;
+    for (const variant of state.singleTileVariants) {
+      if (variant.id > maxVariantId) maxVariantId = variant.id;
+    }
+    state.nextPrimaryTileId = Math.max(maxVariantId + 1, Number(snap.nextPrimaryTileId) || 1);
+    state.activePrimaryTileId = snap.activePrimaryTileId ?? state.singleTileVariants[0]?.id ?? null;
+    recomputeBigTriangle();
+    const snappedTile = state.primaryTiles.find((tile) => tile.id === state.activePrimaryTileId);
+    if (snappedTile) {
+      setActivePrimaryTile(snappedTile, false);
+    } else {
+      setActiveShape(snap.tileShape, false);
+    }
     markInkChanged();
   }
 
@@ -539,11 +649,25 @@ export function mountDesigner(root) {
     return { minX, minY, maxX, maxY, w: maxX - minX, h: maxY - minY };
   }
 
-  function buildPrimaryTile(shape, side, center) {
+  function buildPrimaryTile(id, shape, side, center) {
     const polyLocal = shapePolyLocal(shape, side);
     const bounds = polyBounds(polyLocal);
     const poly = polyLocal.map((p) => add(center, p));
-    return { shape, side, center, polyLocal, poly, bounds };
+    return { id, shape, side, center, polyLocal, poly, bounds };
+  }
+
+  function getSingleLayoutSizing(shape, variantCount = 1, viewW = state.vw, viewH = state.vh, dpr = state.dpr) {
+    const count = Math.max(1, Math.trunc(Number(variantCount) || 1));
+    const minDim = Math.min(viewW, viewH);
+    const templateBounds = polyBounds(shapePolyLocal(shape, 1));
+    const availW = Math.max(1, viewW * 0.5);
+    const availH = Math.max(1, viewH * 0.5);
+    const baseGap = clamp(minDim * 0.038, 10 * dpr, 30 * dpr);
+    const gap = count > 1 ? Math.min(baseGap, availW / (count * 2)) : 0;
+    const sideFromW = (availW - gap * (count - 1)) / Math.max(1, templateBounds.w * count);
+    const sideFromH = availH / Math.max(1, templateBounds.h);
+    const side = Math.max(1e-3, Math.min(sideFromW, sideFromH));
+    return { templateBounds, gap, side };
   }
 
   function recomputeBigTriangle() {
@@ -560,11 +684,16 @@ export function mountDesigner(root) {
 
     if (modeShapes.length === 1) {
       const shape = modeShapes[0];
-      let side = minDim * 0.58;
-      if (shape === "square") side = minDim * 0.54;
-      if (shape === "hexagon") side = minDim * 0.34;
-      if (shape === "octagon") side = minDim * 0.29;
-      tiles.push(buildPrimaryTile(shape, side, v(centerX, centerY)));
+      ensureSingleTileVariants(1);
+      const variantCount = Math.max(1, state.singleTileVariants.length);
+      const { templateBounds, gap, side } = getSingleLayoutSizing(shape, variantCount);
+      const totalW = templateBounds.w * side * variantCount + gap * (variantCount - 1);
+      let x = centerX - totalW / 2;
+      for (const variant of state.singleTileVariants) {
+        const cx = x - templateBounds.minX * side;
+        tiles.push(buildPrimaryTile(variant.id, shape, side, v(cx, centerY)));
+        x += templateBounds.w * side + gap;
+      }
     } else {
       const templates = modeShapes.map((shape) => {
         const b = polyBounds(shapePolyLocal(shape, 1));
@@ -582,14 +711,19 @@ export function mountDesigner(root) {
       let x = centerX - totalW / 2;
       for (const t of templates) {
         const cx = x - t.bounds.minX * side;
-        tiles.push(buildPrimaryTile(t.shape, side, v(cx, centerY)));
+        tiles.push(buildPrimaryTile(`shape:${t.shape}`, t.shape, side, v(cx, centerY)));
         x += t.bounds.w * side + gap;
       }
     }
 
+    const prevActiveTileId = state.activePrimaryTileId;
     state.primaryTiles = tiles;
-    state.tri = state.primaryTiles.find((tile) => tile.shape === state.tileShape) || state.primaryTiles[0] || null;
+    state.tri = state.primaryTiles.find((tile) => tile.id === prevActiveTileId) ||
+      state.primaryTiles.find((tile) => tile.shape === state.tileShape) ||
+      state.primaryTiles[0] ||
+      null;
     if (state.tri) state.tileShape = state.tri.shape;
+    state.activePrimaryTileId = state.tri?.id ?? null;
     syncActiveDesignRefs();
     state.geomRevision += 1;
     invalidateFillCache();
@@ -646,22 +780,29 @@ export function mountDesigner(root) {
 
   function recomputeGrid() {
     if (!state.tri) return;
-    state.grid = computeGridForShape(state.tileShape, state.tri.side);
+    state.grid = computeGridForShape(state.tri.shape, state.tri.side);
+  }
+
+  function setActivePrimaryTile(tile, shouldRender = true) {
+    if (!tile) return;
+    state.tileShape = tile.shape;
+    state.tri = tile;
+    state.activePrimaryTileId = tile.id;
+    syncActiveDesignRefs();
+    recomputeGrid();
+    clearSelection();
+    state.hover = null;
+    state.hoverTileControl = null;
+    state.hoverArcPick = null;
+    state.hoverDeleteInkIndex = -1;
+    if (shouldRender) requestRender();
   }
 
   function setActiveShape(shape, shouldRender = true) {
     if (!isShape(shape)) return;
     const tile = state.primaryTiles.find((t) => t.shape === shape) || state.primaryTiles[0];
     if (!tile) return;
-    state.tileShape = tile.shape;
-    state.tri = tile;
-    syncActiveDesignRefs();
-    recomputeGrid();
-    clearSelection();
-    state.hover = null;
-    state.hoverArcPick = null;
-    state.hoverDeleteInkIndex = -1;
-    if (shouldRender) requestRender();
+    setActivePrimaryTile(tile, shouldRender);
   }
 
   const screenToLocal = (p) => sub(p, state.tri.center);
@@ -1293,7 +1434,12 @@ export function mountDesigner(root) {
     const vh = viewH;
     const dpr = renderDpr;
     const mode = getTilingOption(state.tilingId);
-    const tileByShape = Object.fromEntries(sourceTiles.map((tile) => [tile.shape, tile]));
+    const sourceTilesByShape = new Map();
+    for (const tile of sourceTiles) {
+      if (!sourceTilesByShape.has(tile.shape)) sourceTilesByShape.set(tile.shape, []);
+      sourceTilesByShape.get(tile.shape).push(tile);
+    }
+    const singleShapeTilesetMode = mode.shapes.length === 1 && sourceTiles.length > 1;
     const rnd = mulberry32(BG_SEED >>> 0);
 
     function chooseRot(shape, base = 0) {
@@ -1310,15 +1456,26 @@ export function mountDesigner(root) {
     }
 
     function getUnitForShape(shape, fallback = 72 * dpr) {
-      const tile = tileByShape[shape];
+      if (mode.shapes.length === 1) {
+        const { side } = getSingleLayoutSizing(shape, 1, vw, vh, dpr);
+        return side * BG_SCALE;
+      }
+      const tile = sourceTilesByShape.get(shape)?.[0];
       if (!tile) return fallback;
       return tile.side * BG_SCALE;
     }
 
-    function drawShapeTile(shape, center, side, geomAng = 0, designAng = geomAng) {
-      const primary = tileByShape[shape];
-      const design = getShapeDesign(shape);
+    function chooseSourceTile(shape) {
+      const tiles = sourceTilesByShape.get(shape);
+      if (!tiles?.length) return null;
+      if (!singleShapeTilesetMode) return tiles[0];
+      return tiles[Math.floor(rnd() * tiles.length)];
+    }
+
+    function drawShapeTile(primary, center, side, geomAng = 0, designAng = geomAng) {
+      const design = getDesignForTile(primary);
       if (!primary || !design) return;
+      const shape = primary.shape;
       const points = shapePolyLocal(shape, side).map((p) => add(center, rot(p, geomAng)));
       const clipPad = 0.9 * dpr;
       const clipPoints = points.map((p) => {
@@ -1385,8 +1542,11 @@ export function mountDesigner(root) {
 
     const outlineTiles = drawTileOutlines ? [] : null;
 
-    function stamp(shape, center, side, geomAng = 0, designAng = chooseRot(shape, geomAng)) {
-      const points = drawShapeTile(shape, center, side, geomAng, designAng);
+    function stamp(shape, center, side, geomAng = 0, designAng = null) {
+      const primary = chooseSourceTile(shape);
+      if (!primary) return;
+      const finalDesignAng = designAng ?? chooseRot(shape, geomAng);
+      const points = drawShapeTile(primary, center, side, geomAng, finalDesignAng);
       if (outlineTiles && points?.length) outlineTiles.push(points);
     }
 
@@ -1928,6 +2088,179 @@ export function mountDesigner(root) {
     ctx.arc(p.x, p.y, r, 0, TAU);
     ctx.fill();
     ctx.restore();
+  }
+
+  function pointInRectScreen(p, rect) {
+    return p.x >= rect.x && p.x <= rect.x + rect.w && p.y >= rect.y && p.y <= rect.y + rect.h;
+  }
+
+  function pathRoundedRect(x, y, w, h, radius) {
+    const r = clamp(radius, 0, Math.min(w, h) / 2);
+    ctx.beginPath();
+    ctx.moveTo(x + r, y);
+    ctx.lineTo(x + w - r, y);
+    ctx.quadraticCurveTo(x + w, y, x + w, y + r);
+    ctx.lineTo(x + w, y + h - r);
+    ctx.quadraticCurveTo(x + w, y + h, x + w - r, y + h);
+    ctx.lineTo(x + r, y + h);
+    ctx.quadraticCurveTo(x, y + h, x, y + h - r);
+    ctx.lineTo(x, y + r);
+    ctx.quadraticCurveTo(x, y, x + r, y);
+    ctx.closePath();
+  }
+
+  function buildTileSetControlGeom(center) {
+    const buttonSize = TILESET_CONTROL_BUTTON_SIZE_PX * state.dpr;
+    const panelPad = TILESET_CONTROL_PANEL_PADDING_PX * state.dpr;
+    const panelSize = buttonSize + panelPad * 2;
+    return {
+      center,
+      panelRect: {
+        x: center.x - panelSize / 2,
+        y: center.y - panelSize / 2,
+        w: panelSize,
+        h: panelSize,
+      },
+      buttonRect: {
+        x: center.x - buttonSize / 2,
+        y: center.y - buttonSize / 2,
+        w: buttonSize,
+        h: buttonSize,
+      },
+    };
+  }
+
+  function buildSingleTileSetControls() {
+    if (!isSingleShapeLayout()) return null;
+    if (!state.primaryTiles.length) return null;
+    const controls = { add: null, remove: [] };
+    const gap = TILESET_CONTROL_GAP_PX * state.dpr;
+    const panelSize = (TILESET_CONTROL_BUTTON_SIZE_PX + TILESET_CONTROL_PANEL_PADDING_PX * 2) * state.dpr;
+    const lastTile = state.primaryTiles[state.primaryTiles.length - 1];
+    const addCenter = v(lastTile.center.x + lastTile.bounds.maxX + gap + panelSize / 2, lastTile.center.y);
+    controls.add = {
+      type: "add",
+      ...buildTileSetControlGeom(addCenter),
+    };
+    if (state.primaryTiles.length > 1) {
+      for (const tile of state.primaryTiles) {
+        const removeCenter = v(tile.center.x, tile.center.y + tile.bounds.minY - gap - panelSize / 2);
+        controls.remove.push({
+          type: "remove",
+          tileId: tile.id,
+          ...buildTileSetControlGeom(removeCenter),
+        });
+      }
+    }
+    return controls;
+  }
+
+  function findSingleTileControlHit(pScreen) {
+    const controls = buildSingleTileSetControls();
+    if (!controls) return null;
+    if (controls.add && pointInRectScreen(pScreen, controls.add.panelRect)) {
+      return controls.add;
+    }
+    for (const btn of controls.remove) {
+      if (pointInRectScreen(pScreen, btn.panelRect)) return btn;
+    }
+    return null;
+  }
+
+  function drawTileSetControlButton(btn, symbol, hovered = false) {
+    const lineW = Math.max(1, 1.85 * state.dpr);
+    const panelRadius = TILESET_CONTROL_PANEL_RADIUS_PX * state.dpr;
+    const buttonRadius = TILESET_CONTROL_BUTTON_RADIUS_PX * state.dpr;
+    const panel = btn.panelRect;
+    const button = btn.buttonRect;
+    ctx.save();
+    pathRoundedRect(panel.x, panel.y, panel.w, panel.h, panelRadius);
+    ctx.shadowColor = "rgba(0, 0, 0, 0.12)";
+    ctx.shadowBlur = 22 * state.dpr;
+    ctx.shadowOffsetY = 9 * state.dpr;
+    ctx.fillStyle = "rgba(255, 255, 255, 0.92)";
+    ctx.fill();
+    ctx.shadowColor = "transparent";
+    ctx.shadowBlur = 0;
+    ctx.shadowOffsetY = 0;
+    ctx.strokeStyle = "#d7d7d7";
+    ctx.lineWidth = 1 * state.dpr;
+    ctx.stroke();
+
+    pathRoundedRect(button.x, button.y, button.w, button.h, buttonRadius);
+    ctx.fillStyle = hovered ? "#f3f3f3" : "#fff";
+    ctx.fill();
+    ctx.strokeStyle = "#cbcbcb";
+    ctx.lineWidth = 1 * state.dpr;
+    ctx.stroke();
+
+    const cx = btn.center.x;
+    const cy = btn.center.y;
+    const arm = button.w * 0.26;
+    ctx.strokeStyle = "#111";
+    ctx.lineWidth = lineW;
+    ctx.lineCap = "round";
+    ctx.beginPath();
+    ctx.moveTo(cx - arm, cy);
+    ctx.lineTo(cx + arm, cy);
+    if (symbol === "+") {
+      ctx.moveTo(cx, cy - arm);
+      ctx.lineTo(cx, cy + arm);
+    }
+    ctx.stroke();
+    ctx.restore();
+  }
+
+  function drawSingleTileSetControls() {
+    const controls = buildSingleTileSetControls();
+    if (!controls) return;
+    for (const btn of controls.remove) {
+      const hovered = state.hoverTileControl?.type === "remove" && state.hoverTileControl.tileId === btn.tileId;
+      drawTileSetControlButton(btn, "-", hovered);
+    }
+    if (controls.add) {
+      const hovered = state.hoverTileControl?.type === "add";
+      drawTileSetControlButton(controls.add, "+", hovered);
+    }
+  }
+
+  function addSingleLayoutPrimaryTile() {
+    if (!isSingleShapeLayout()) return false;
+    pushUndo();
+    const nextVariant = {
+      id: state.nextPrimaryTileId++,
+      design: createEmptyDesign(),
+    };
+    state.singleTileVariants.push(nextVariant);
+    state.activePrimaryTileId = nextVariant.id;
+    recomputeBigTriangle();
+    const activeTile = state.primaryTiles.find((tile) => tile.id === nextVariant.id) || state.primaryTiles[state.primaryTiles.length - 1];
+    if (activeTile) setActivePrimaryTile(activeTile, false);
+    updateHoverPick();
+    requestRender();
+    return true;
+  }
+
+  function removeSingleLayoutPrimaryTile(tileId) {
+    if (!isSingleShapeLayout()) return false;
+    const idx = state.singleTileVariants.findIndex((variant) => variant.id === tileId);
+    if (idx < 0) return false;
+    if (state.singleTileVariants.length <= 1) return false;
+    pushUndo();
+    const prevActiveId = state.activePrimaryTileId;
+    state.singleTileVariants.splice(idx, 1);
+    const activeStillExists = state.singleTileVariants.some((variant) => variant.id === prevActiveId);
+    const nextIdx = clamp(idx, 0, state.singleTileVariants.length - 1);
+    const fallbackId = activeStillExists
+      ? prevActiveId
+      : state.singleTileVariants[nextIdx]?.id ?? state.singleTileVariants[state.singleTileVariants.length - 1]?.id ?? null;
+    state.activePrimaryTileId = fallbackId;
+    recomputeBigTriangle();
+    const activeTile = state.primaryTiles.find((tile) => tile.id === fallbackId) || state.primaryTiles[state.primaryTiles.length - 1];
+    if (activeTile) setActivePrimaryTile(activeTile, false);
+    updateHoverPick();
+    requestRender();
+    return true;
   }
 
   function drawNearestGridPoint() {
@@ -2568,7 +2901,7 @@ export function mountDesigner(root) {
   }
 
   function replaceActiveFills(nextFills) {
-    const activeDesign = getShapeDesign(state.tileShape);
+    const activeDesign = getActiveDesign();
     const target = activeDesign?.fills || state.fills;
     target.length = 0;
     for (const fill of nextFills) target.push(fill);
@@ -2739,23 +3072,23 @@ export function mountDesigner(root) {
     renderBackgroundTiling();
     if (!state.primaryTiles.length) return;
     const tiles = [...state.primaryTiles];
-    tiles.sort((a, b) => (a.shape === state.tileShape ? 1 : 0) - (b.shape === state.tileShape ? 1 : 0));
+    tiles.sort((a, b) => (a.id === state.activePrimaryTileId ? 1 : 0) - (b.id === state.activePrimaryTileId ? 1 : 0));
 
     for (const tile of tiles) {
-      drawPrimaryTileShadow(tile, tile.shape === state.tileShape);
+      drawPrimaryTileShadow(tile, tile.id === state.activePrimaryTileId);
     }
     for (const tile of tiles) {
       fillPrimaryTileWhite(tile);
     }
     for (const tile of tiles) {
-      drawInnerTriGrid(tile, tile.shape === state.tileShape);
-      drawGridCenterMarker(tile, tile.shape === state.tileShape);
+      drawInnerTriGrid(tile, tile.id === state.activePrimaryTileId);
+      drawGridCenterMarker(tile, tile.id === state.activePrimaryTileId);
     }
     drawNearestGridPoint();
     drawNearestToolSnapPoint();
 
     for (const tile of tiles) {
-      const design = getShapeDesign(tile.shape);
+      const design = getDesignForTile(tile);
       drawInkBig(tile, design, 1);
       drawFillsBig(tile, design);
       drawInkBig(tile, design, 2);
@@ -2765,8 +3098,9 @@ export function mountDesigner(root) {
     drawHoverDeleteHighlight();
     drawHoverArcHighlight();
     for (const tile of tiles) {
-      strokePrimaryTile(tile, tile.shape === state.tileShape);
+      strokePrimaryTile(tile, tile.id === state.activePrimaryTileId);
     }
+    drawSingleTileSetControls();
 
     drawPreviewUnclippedBlue();
   }
@@ -2777,6 +3111,7 @@ export function mountDesigner(root) {
   }
 
   function updateHover(pScreen) {
+    state.hoverTileControl = findSingleTileControlHit(pScreen);
     if (!state.tri) {
       state.hover = null;
       state.hoverArcPick = null;
@@ -2808,9 +3143,19 @@ export function mountDesigner(root) {
   function onPointerDown(e) {
     if (state.shapeDialogOpen || state.exportDialogOpen) return;
     const p = getPointer(e);
+    const controlHit = findSingleTileControlHit(p);
+    if (controlHit?.type === "add") {
+      addSingleLayoutPrimaryTile();
+      return;
+    }
+    if (controlHit?.type === "remove") {
+      removeSingleLayoutPrimaryTile(controlHit.tileId);
+      return;
+    }
+
     const hitTile = findPrimaryTileAtScreen(p);
-    if (hitTile && hitTile.shape !== state.tileShape) {
-      setActiveShape(hitTile.shape, false);
+    if (hitTile && hitTile.id !== state.activePrimaryTileId) {
+      setActivePrimaryTile(hitTile, false);
     }
     if (!state.tri) return;
     canvas.setPointerCapture?.(e.pointerId);
@@ -2921,8 +3266,8 @@ export function mountDesigner(root) {
       const releaseTile = releaseScreen
         ? findPrimaryTileAtScreen(releaseScreen) || findNearestPrimaryTileAtScreen(releaseScreen)
         : null;
-      if (releaseTile && releaseTile.shape !== state.tileShape) {
-        setActiveShape(releaseTile.shape, false);
+      if (releaseTile && releaseTile.id !== state.activePrimaryTileId) {
+        setActivePrimaryTile(releaseTile, false);
       }
       const targetTile = state.tri;
       if (targetTile) {
@@ -3050,7 +3395,7 @@ export function mountDesigner(root) {
   }
 
   function createEmptyShapeDesigns() {
-    return Object.fromEntries(SHAPES.map((shape) => [shape, { ink: [], fills: [] }]));
+    return Object.fromEntries(SHAPES.map((shape) => [shape, createEmptyDesign()]));
   }
 
   function openShapeDialog(required = false) {
@@ -3145,12 +3490,16 @@ export function mountDesigner(root) {
     state.pendingTilingId = loaded.tilingId;
     state.tileShape = loaded.tileShape;
     state.shapeDesigns = loaded.shapeDesigns;
+    state.singleTileVariants = loaded.singleTileVariants;
+    state.activePrimaryTileId = loaded.activePrimaryTileId;
+    state.nextPrimaryTileId = loaded.nextPrimaryTileId;
     state.nextInkId = loaded.nextInkId;
     state.pointerDown = false;
     state.drawing = null;
     state.selectionDrag = null;
     clearSelection();
     state.hover = null;
+    state.hoverTileControl = null;
     state.hoverArcPick = null;
     state.hoverDeleteInkIndex = -1;
     state.shapeDialogOpen = false;
@@ -3693,7 +4042,7 @@ export function mountDesigner(root) {
 
     for (let i = 0; i < tiles.length; i += 1) {
       const tile = tiles[i];
-      const design = getShapeDesign(tile.shape);
+      const design = getDesignForTile(tile);
       if (!design) continue;
       const tilePath = svgPathFromPoly(tile.polyLocal);
       if (!tilePath) continue;
@@ -3766,7 +4115,7 @@ export function mountDesigner(root) {
     exportCtx.fillRect(0, 0, width, height);
 
     const exportTiles = state.primaryTiles.map((tile) =>
-      buildPrimaryTile(tile.shape, tile.side / Math.max(1, state.dpr), v(width * 0.5, height * 0.5))
+      buildPrimaryTile(tile.id, tile.shape, tile.side / Math.max(1, state.dpr), v(width * 0.5, height * 0.5))
     );
     renderBackgroundTiling(exportCtx, width, height, exportTiles, 1, false);
     triggerPngDownload(exportCanvas, width, height);
@@ -3783,8 +4132,13 @@ export function mountDesigner(root) {
     state.drawing = null;
     clearSelection();
     state.hover = null;
+    state.hoverTileControl = null;
     state.hoverArcPick = null;
+    state.hoverDeleteInkIndex = -1;
     state.shapeDesigns = createEmptyShapeDesigns();
+    state.singleTileVariants = [{ id: 1, design: createEmptyDesign() }];
+    state.activePrimaryTileId = 1;
+    state.nextPrimaryTileId = 2;
     state.nextInkId = 1;
     syncActiveDesignRefs();
     state.undoStack.length = 0;
@@ -3894,12 +4248,19 @@ export function mountDesigner(root) {
 
   function onClear() {
     pushUndo();
-    const modeShapes = getTilingOption(state.tilingId).shapes;
-    for (const shape of modeShapes) {
-      const design = getShapeDesign(shape);
-      if (!design) continue;
-      design.ink.length = 0;
-      design.fills.length = 0;
+    if (isSingleShapeLayout()) {
+      for (const variant of state.singleTileVariants) {
+        variant.design.ink.length = 0;
+        variant.design.fills.length = 0;
+      }
+    } else {
+      const modeShapes = getTilingOption(state.tilingId).shapes;
+      for (const shape of modeShapes) {
+        const design = getShapeDesign(shape);
+        if (!design) continue;
+        design.ink.length = 0;
+        design.fills.length = 0;
+      }
     }
     clearSelection();
     syncActiveDesignRefs();
@@ -4122,6 +4483,7 @@ export function mountDesigner(root) {
   on(canvas, "pointercancel", onPointerUp);
   on(canvas, "pointerleave", () => {
     state.hover = null;
+    state.hoverTileControl = null;
     state.hoverArcPick = null;
     state.hoverDeleteInkIndex = -1;
     requestRender();
