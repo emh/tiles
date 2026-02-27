@@ -2327,6 +2327,57 @@ export function mountDesigner(root) {
     ctx.restore();
   }
 
+  function findNearestTileEdgeProjection(tile, pLocal, maxDist = 1.5 * state.dpr) {
+    if (!tile?.polyLocal?.length) return null;
+    let best = null;
+    for (let i = 0; i < tile.polyLocal.length; i += 1) {
+      const a = tile.polyLocal[i];
+      const b = tile.polyLocal[(i + 1) % tile.polyLocal.length];
+      const ab = sub(b, a);
+      const denom = dot(ab, ab) || 1;
+      const t = clamp(dot(sub(pLocal, a), ab) / denom, 0, 1);
+      const proj = add(a, mul(ab, t));
+      const dist = len(sub(pLocal, proj));
+      if (dist > maxDist) continue;
+      if (!best || dist < best.dist) best = { edgeIndex: i, t, point: proj, dist };
+    }
+    return best;
+  }
+
+  function drawMappedEdgePreviewDots() {
+    if (!state.hover || !state.tri) return;
+    if (state.primaryTiles.length <= 1) return;
+    if (state.tool === "fill" || state.tool === "delete") return;
+
+    const activeTile = state.tri;
+    const sourceLocal = localForToolFromHover(state.tool);
+    if (!sourceLocal) return;
+    const edgeHit = findNearestTileEdgeProjection(activeTile, sourceLocal);
+    if (!edgeHit) return;
+
+    const r = 3.2 * state.dpr;
+    ctx.save();
+    ctx.fillStyle = "#b9b9b9";
+    ctx.globalAlpha = 0.88;
+    for (const tile of state.primaryTiles) {
+      if (!tile || tile.id === activeTile.id || !tile.polyLocal?.length) continue;
+      const mapped = [];
+      for (let i = 0; i < tile.polyLocal.length; i += 1) {
+        const a = tile.polyLocal[i];
+        const b = tile.polyLocal[(i + 1) % tile.polyLocal.length];
+        mapped.push(add(a, mul(sub(b, a), edgeHit.t)));
+      }
+      const uniq = dedupeHandlePoints(mapped, 1e-4);
+      for (const p of uniq) {
+        const s = localToScreenForTile(tile, p);
+        ctx.beginPath();
+        ctx.arc(s.x, s.y, r, 0, TAU);
+        ctx.fill();
+      }
+    }
+    ctx.restore();
+  }
+
   function drawFillsBig(tile, design) {
     if (!tile || !design) return;
     ctx.save();
@@ -3101,6 +3152,7 @@ export function mountDesigner(root) {
     }
     drawNearestGridPoint();
     drawNearestToolSnapPoint();
+    drawMappedEdgePreviewDots();
 
     for (const tile of tiles) {
       const design = getDesignForTile(tile);
