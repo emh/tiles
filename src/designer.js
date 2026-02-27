@@ -115,6 +115,8 @@ export function mountDesigner(root) {
   };
   const BG_SCALE = 0.165;
   const BG_SEED = 1337;
+  const BG_CLIP_PAD_SCREEN_PX = 0.9;
+  const BG_CLIP_PAD_EXPORT_PX = 2.2;
   const SAVE_DOC_VERSION = 2;
   const DEFAULT_FILL_COLOR = "#000000";
   const DEFAULT_FILL_COLORS = ["#ffffff", "#000000", "#ff0000", "#00ff00", "#0000ff", "#ffff00", "#00ffff", "#ff00ff"];
@@ -1753,6 +1755,7 @@ export function mountDesigner(root) {
     }
     const singleShapeTilesetMode = mode.shapes.length === 1 && sourceTiles.length > 1;
     const rnd = mulberry32(BG_SEED >>> 0);
+    const clipPadPx = allowFillCompute ? BG_CLIP_PAD_EXPORT_PX : BG_CLIP_PAD_SCREEN_PX;
 
     function chooseRot(shape, base = 0) {
       const rots = ROTS_BY_SHAPE[shape] || [0];
@@ -1789,7 +1792,7 @@ export function mountDesigner(root) {
       if (!primary || !design) return;
       const shape = primary.shape;
       const points = shapePolyLocal(shape, side).map((p) => add(center, rot(p, geomAng)));
-      const clipPad = 0.9 * dpr;
+      const clipPad = clipPadPx * dpr;
       const clipPoints = points.map((p) => {
         const dv = sub(p, center);
         const L = len(dv) || 1;
