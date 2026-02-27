@@ -28,6 +28,12 @@ export function mountDesigner(root) {
   const paletteToolButtons = [...root.querySelectorAll("#toolPalette .palette-btn[data-tool]")];
   const palUndo = root.querySelector("#palUndo");
   const palRedo = root.querySelector("#palRedo");
+  const palFillColorWrap = root.querySelector("#palFillColorWrap");
+  const palFillColor = root.querySelector("#palFillColor");
+  const palFillColorDrawer = root.querySelector("#palFillColorDrawer");
+  const palFillSwatches = root.querySelector("#palFillSwatches");
+  const palFillColorAdd = root.querySelector("#palFillColorAdd");
+  const palFillColorPicker = root.querySelector("#palFillColorPicker");
   const gridSizeItems = [...root.querySelectorAll(".menu-item[data-grid-size]")];
   const shapeDialogBackdrop = root.querySelector("#shapeDialogBackdrop");
   const shapeOptionList = root.querySelector("#shapeOptionList");
@@ -59,6 +65,12 @@ export function mountDesigner(root) {
       !(toolPalette instanceof HTMLElement) ||
       !(palUndo instanceof HTMLButtonElement) ||
       !(palRedo instanceof HTMLButtonElement) ||
+      !(palFillColorWrap instanceof HTMLElement) ||
+      !(palFillColor instanceof HTMLButtonElement) ||
+      !(palFillColorDrawer instanceof HTMLElement) ||
+      !(palFillSwatches instanceof HTMLElement) ||
+      !(palFillColorAdd instanceof HTMLButtonElement) ||
+      !(palFillColorPicker instanceof HTMLInputElement) ||
       !(shapeDialogBackdrop instanceof HTMLElement) ||
       !(shapeOptionList instanceof HTMLElement) ||
       !(btnShapeClose instanceof HTMLButtonElement) ||
@@ -104,6 +116,9 @@ export function mountDesigner(root) {
   const BG_SCALE = 0.165;
   const BG_SEED = 1337;
   const SAVE_DOC_VERSION = 2;
+  const DEFAULT_FILL_COLOR = "#000000";
+  const DEFAULT_FILL_COLORS = ["#ffffff", "#000000", "#ff0000", "#00ff00", "#0000ff", "#ffff00", "#00ffff", "#ff00ff"];
+  const DEFAULT_FILL_COLOR_SET = new Set(DEFAULT_FILL_COLORS);
   const TILESET_CONTROL_BUTTON_SIZE_PX = 30;
   const TILESET_CONTROL_BUTTON_RADIUS_PX = 7;
   const TILESET_CONTROL_PANEL_PADDING_PX = 7;
@@ -178,11 +193,14 @@ export function mountDesigner(root) {
     exportWidth: 1920,
     exportHeight: 1080,
 
-    showGrid: false,
-    snap: false,
+    showGrid: true,
+    snap: true,
     toolSnap: true,
     gridDivisions: 16,
     showToolsPalette: true,
+    fillColor: DEFAULT_FILL_COLOR,
+    customFillColors: [],
+    fillColorDrawerOpen: false,
     grid: null,
 
     primaryTiles: [],
@@ -210,6 +228,10 @@ export function mountDesigner(root) {
     hoverTileControl: null,
     hoverArcPick: null,
     hoverDeleteInkIndex: -1,
+
+    fillComputeOpsThisFrame: 0,
+    fillComputeDeferred: false,
+    fillComputedThisFrame: false,
 
     rafPending: false,
   };
@@ -316,7 +338,7 @@ export function mountDesigner(root) {
   }
 
   function cloneFill(f) {
-    const out = { x: f.x, y: f.y };
+    const out = { x: f.x, y: f.y, color: normalizeFillColor(f.color, DEFAULT_FILL_COLOR) };
     if (Array.isArray(f.boundaryInkIds)) out.boundaryInkIds = [...f.boundaryInkIds];
     if (f.usesTileBoundary) out.usesTileBoundary = true;
     return out;
@@ -341,6 +363,33 @@ export function mountDesigner(root) {
   function toInkId(value) {
     const n = Number(value);
     return Number.isInteger(n) && n > 0 ? n : null;
+  }
+
+  function normalizeFillColor(value, fallback = null) {
+    if (typeof value !== "string") return fallback;
+    const raw = value.trim().toLowerCase();
+    if (/^#[0-9a-f]{6}$/.test(raw)) return raw;
+    const short = raw.match(/^#([0-9a-f]{3})$/);
+    if (!short) return fallback;
+    const [r, g, b] = short[1];
+    return `#${r}${r}${g}${g}${b}${b}`;
+  }
+
+  function sanitizeCustomFillColors(colors) {
+    if (!Array.isArray(colors)) return [];
+    const out = [];
+    for (const rawColor of colors) {
+      const color = normalizeFillColor(rawColor);
+      if (!color) continue;
+      if (DEFAULT_FILL_COLOR_SET.has(color)) continue;
+      if (out.includes(color)) continue;
+      out.push(color);
+    }
+    return out;
+  }
+
+  function fillColorForFill(fill) {
+    return normalizeFillColor(fill?.color, DEFAULT_FILL_COLOR);
   }
 
   function sanitizePoint(rawPoint) {
@@ -398,7 +447,7 @@ export function mountDesigner(root) {
     const x = toFiniteNumber(rawFill.x);
     const y = toFiniteNumber(rawFill.y);
     if (x === null || y === null) return null;
-    const out = { x, y };
+    const out = { x, y, color: normalizeFillColor(rawFill.color, DEFAULT_FILL_COLOR) };
     if (Array.isArray(rawFill.boundaryInkIds)) {
       const ids = [];
       for (const rawId of rawFill.boundaryInkIds) {
@@ -500,6 +549,23 @@ export function mountDesigner(root) {
       shapeDesigns[tileShape] = cloneDesign(singleTileVariants[0]?.design || createEmptyDesign());
     }
 
+    const customFillColors = sanitizeCustomFillColors(rawDoc.customFillColors);
+    function collectCustomColorsFromDesign(design) {
+      if (!design?.fills?.length) return;
+      for (const fill of design.fills) {
+        const color = fillColorForFill(fill);
+        if (DEFAULT_FILL_COLOR_SET.has(color)) continue;
+        if (customFillColors.includes(color)) continue;
+        customFillColors.push(color);
+      }
+    }
+    for (const shape of modeShapes) {
+      collectCustomColorsFromDesign(shapeDesigns[shape]);
+    }
+    for (const variant of singleTileVariants) {
+      collectCustomColorsFromDesign(variant.design);
+    }
+
     return {
       tilingId,
       tileShape,
@@ -508,6 +574,8 @@ export function mountDesigner(root) {
       activePrimaryTileId,
       nextPrimaryTileId,
       nextInkId: Math.max(1, nextInkIdRef.value),
+      fillColor: normalizeFillColor(rawDoc.fillColor, DEFAULT_FILL_COLOR),
+      customFillColors,
     };
   }
 
@@ -527,6 +595,8 @@ export function mountDesigner(root) {
         version: SAVE_DOC_VERSION,
         tilingId: state.tilingId,
         tileShape: state.tileShape,
+        fillColor: state.fillColor,
+        customFillColors: sanitizeCustomFillColors(state.customFillColors),
         designs,
         singleTiles: variants.map((variant) => cloneDesign(variant.design)),
         activeSingleTileIndex: Math.max(0, variants.findIndex((variant) => variant.id === state.activePrimaryTileId)),
@@ -542,6 +612,8 @@ export function mountDesigner(root) {
       version: SAVE_DOC_VERSION,
       tilingId: state.tilingId,
       tileShape: state.tileShape,
+      fillColor: state.fillColor,
+      customFillColors: sanitizeCustomFillColors(state.customFillColors),
       designs,
     };
   }
@@ -599,7 +671,9 @@ export function mountDesigner(root) {
   }
 
   function getFillCacheKey() {
-    return `${state.inkRevision}:${state.geomRevision}:${state.dpr}`;
+    // Fill seeds/ink are stored in world space, so pure layout/size changes
+    // should reuse cached masks and only rescale at draw time.
+    return `${state.inkRevision}:${state.dpr}`;
   }
 
   function markInkChanged() {
@@ -740,7 +814,6 @@ export function mountDesigner(root) {
     state.activePrimaryTileId = state.tri?.id ?? null;
     syncActiveDesignRefs();
     state.geomRevision += 1;
-    invalidateFillCache();
   }
 
   function computeGridForShape(shape, side) {
@@ -986,6 +1059,11 @@ export function mountDesigner(root) {
 
   const TILE_BOUNDARY_CODE = 1;
   const INK_CODE_OFFSET = 2;
+  const FILL_MASK_STROKE_PX = 2.05;
+  const FILL_MASK_WALL_THRESHOLD = 205;
+  const ENABLE_FILL_BOUNDARY_REFINEMENT = false;
+  const FILL_REFINEMENT_MAX_BOUNDARY_IDS = 12;
+  const FILL_REFINEMENT_MAX_TOTAL_IDS = 96;
 
   function fillBoundaryInkList(design, boundaryInkIds = null) {
     if (!Array.isArray(boundaryInkIds)) return design.ink;
@@ -1044,8 +1122,37 @@ export function mountDesigner(root) {
     const full = computeFillMaskAtSeed(seedWorld, tile, design, allIds);
     if (!full) return null;
 
+    const candidateIds = Array.isArray(full.boundaryInkIds)
+      ? full.boundaryInkIds.filter((id) => isValidInkId(id))
+      : [];
+    if (!candidateIds.length) {
+      return {
+        boundaryInkIds: [],
+        usesTileBoundary: !!full.usesTileBoundary,
+        data: full,
+      };
+    }
+
+    if (!ENABLE_FILL_BOUNDARY_REFINEMENT) {
+      return {
+        boundaryInkIds: candidateIds,
+        usesTileBoundary: !!full.usesTileBoundary,
+        data: full,
+      };
+    }
+
+    // Full leave-one-out against every ink is O(n) flood-fills and can stall pointerdown.
+    // Refine only likely boundary candidates, and skip refinement when the set is large.
+    if (candidateIds.length > FILL_REFINEMENT_MAX_BOUNDARY_IDS || allIds.length > FILL_REFINEMENT_MAX_TOTAL_IDS) {
+      return {
+        boundaryInkIds: candidateIds,
+        usesTileBoundary: !!full.usesTileBoundary,
+        data: full,
+      };
+    }
+
     const boundaryInkIds = [];
-    for (const id of allIds) {
+    for (const id of candidateIds) {
       const without = allIds.filter((candidate) => candidate !== id);
       const candidateData = computeFillMaskAtSeed(seedWorld, tile, design, without);
       if (!candidateData || candidateData.sig !== full.sig) {
@@ -1053,8 +1160,32 @@ export function mountDesigner(root) {
       }
     }
 
+    if (!boundaryInkIds.length) {
+      return {
+        boundaryInkIds: candidateIds,
+        usesTileBoundary: !!full.usesTileBoundary,
+        data: full,
+      };
+    }
+
+    const sameAsCandidates = boundaryInkIds.length === candidateIds.length &&
+      boundaryInkIds.every((id, idx) => id === candidateIds[idx]);
+    if (sameAsCandidates) {
+      return {
+        boundaryInkIds,
+        usesTileBoundary: !!full.usesTileBoundary,
+        data: full,
+      };
+    }
+
     const boundaryData = computeFillMaskAtSeed(seedWorld, tile, design, boundaryInkIds);
-    if (!boundaryData) return null;
+    if (!boundaryData) {
+      return {
+        boundaryInkIds: candidateIds,
+        usesTileBoundary: !!full.usesTileBoundary,
+        data: full,
+      };
+    }
     return {
       boundaryInkIds,
       usesTileBoundary: !!boundaryData.usesTileBoundary,
@@ -1116,14 +1247,14 @@ export function mountDesigner(root) {
     g.strokeStyle = "#000";
     g.lineJoin = "round";
     g.lineCap = "round";
-    g.lineWidth = 1.15;
+    g.lineWidth = FILL_MASK_STROKE_PX;
     for (const ink of localInk) drawLocalInkStroke(g, ink, toPix, s);
 
     const img = g.getImageData(0, 0, w, h).data;
     const idx = (x, y) => (y * w + x) * 4;
     const isWall = (x, y) => {
       const i = idx(x, y);
-      return img[i] < 170 || img[i + 1] < 170 || img[i + 2] < 170;
+      return img[i] < FILL_MASK_WALL_THRESHOLD || img[i + 1] < FILL_MASK_WALL_THRESHOLD || img[i + 2] < FILL_MASK_WALL_THRESHOLD;
     };
 
     const sx = Math.floor(seedPix.x);
@@ -1230,7 +1361,7 @@ export function mountDesigner(root) {
     g.strokeStyle = "#000";
     g.lineJoin = "round";
     g.lineCap = "round";
-    g.lineWidth = 1.15;
+    g.lineWidth = FILL_MASK_STROKE_PX;
     strokeTilePoly(g);
 
     cg.clearRect(0, 0, w, h);
@@ -1238,7 +1369,7 @@ export function mountDesigner(root) {
     cg.fillRect(0, 0, w, h);
     cg.lineJoin = "round";
     cg.lineCap = "round";
-    cg.lineWidth = 1.15;
+    cg.lineWidth = FILL_MASK_STROKE_PX;
     cg.strokeStyle = colorForCode(TILE_BOUNDARY_CODE);
     strokeTilePoly(cg);
 
@@ -1260,15 +1391,65 @@ export function mountDesigner(root) {
       return pointInTile(v(lx, ly), tile);
     };
 
-    const isWall = (x, y) => {
+    const rawIsWall = (x, y) => {
       const i = idx(x, y);
-      return data[i] < 170 || data[i + 1] < 170 || data[i + 2] < 170;
+      return data[i] < FILL_MASK_WALL_THRESHOLD || data[i + 1] < FILL_MASK_WALL_THRESHOLD || data[i + 2] < FILL_MASK_WALL_THRESHOLD;
     };
 
-    const wallCode = (x, y) => {
+    const rawWallCode = (x, y) => {
       const i = idx(x, y);
       return codeData[i] + (codeData[i + 1] << 8) + (codeData[i + 2] << 16);
     };
+
+    const wallMask = new Uint8Array(w * h);
+    const wallCodes = new Uint32Array(w * h);
+    for (let y = 0; y < h; y += 1) {
+      for (let x = 0; x < w; x += 1) {
+        const vi = y * w + x;
+        if (!rawIsWall(x, y)) continue;
+        wallMask[vi] = 1;
+        wallCodes[vi] = rawWallCode(x, y);
+      }
+    }
+
+    // Close corner leaks on thin diagonals to keep boundary detection stable across scale changes.
+    const DILATE_WALL_ITERS = 1;
+    for (let it = 0; it < DILATE_WALL_ITERS; it += 1) {
+      const prevMask = wallMask.slice();
+      const prevCodes = wallCodes.slice();
+      for (let y = 1; y < h - 1; y += 1) {
+        for (let x = 1; x < w - 1; x += 1) {
+          const vi = y * w + x;
+          if (prevMask[vi]) continue;
+          let hasNeighborWall = false;
+          let pickedCode = 0;
+          let sawTileBoundary = false;
+          for (let oy = -1; oy <= 1; oy += 1) {
+            for (let ox = -1; ox <= 1; ox += 1) {
+              if (!ox && !oy) continue;
+              const nvi = (y + oy) * w + (x + ox);
+              if (!prevMask[nvi]) continue;
+              hasNeighborWall = true;
+              const nCode = prevCodes[nvi] || 0;
+              if (nCode >= INK_CODE_OFFSET) {
+                pickedCode = nCode;
+                break;
+              }
+              if (nCode === TILE_BOUNDARY_CODE) sawTileBoundary = true;
+              if (!pickedCode && nCode > 0) pickedCode = nCode;
+            }
+            if (pickedCode >= INK_CODE_OFFSET) break;
+          }
+          if (!hasNeighborWall) continue;
+          if (pickedCode < INK_CODE_OFFSET && sawTileBoundary) pickedCode = TILE_BOUNDARY_CODE;
+          wallMask[vi] = 1;
+          wallCodes[vi] = pickedCode;
+        }
+      }
+    }
+
+    const isWall = (x, y) => wallMask[y * w + x] === 1;
+    const wallCode = (x, y) => wallCodes[y * w + x] || 0;
 
     const sx = Math.floor(seedPix.x);
     const sy = Math.floor(seedPix.y);
@@ -1292,6 +1473,22 @@ export function mountDesigner(root) {
     };
     push(sx, sy);
 
+    const collectInkIdsNearWall = (x, y) => {
+      let touchedTileBoundary = false;
+      for (let oy = -1; oy <= 1; oy += 1) {
+        for (let ox = -1; ox <= 1; ox += 1) {
+          const nx = x + ox;
+          const ny = y + oy;
+          if (nx < 0 || ny < 0 || nx >= w || ny >= h) continue;
+          if (!isWall(nx, ny)) continue;
+          const code = wallCode(nx, ny);
+          if (code === TILE_BOUNDARY_CODE) touchedTileBoundary = true;
+          if (code >= INK_CODE_OFFSET) touchedInkIds.add(inkIdFromCode(code));
+        }
+      }
+      return touchedTileBoundary;
+    };
+
     while (qh < qt) {
       const x = qx[qh];
       const y = qy[qh];
@@ -1305,9 +1502,7 @@ export function mountDesigner(root) {
         if (visited[vi]) continue;
         if (!insideShape(nx, ny)) continue;
         if (isWall(nx, ny)) {
-          const code = wallCode(nx, ny);
-          if (code === TILE_BOUNDARY_CODE) usesTileBoundary = true;
-          if (code >= INK_CODE_OFFSET) touchedInkIds.add(inkIdFromCode(code));
+          if (collectInkIdsNearWall(nx, ny)) usesTileBoundary = true;
           continue;
         }
         push(nx, ny);
@@ -1386,7 +1581,6 @@ export function mountDesigner(root) {
     mg.putImageData(out, 0, 0);
 
     const boundaryIds = [...touchedInkIds].sort((a, b) => a - b);
-    const closedByInk = isSeedClosedByBoundaryInk(seedLocal, tile, boundaryInk);
     const sig = `${w}:${h}:${count}:${hash >>> 0}`;
     return {
       bmp: mask,
@@ -1397,32 +1591,135 @@ export function mountDesigner(root) {
       sig,
       boundaryInkIds: boundaryIds,
       usesTileBoundary,
-      closedByInk,
+      closedByInk: null,
     };
   }
 
   function getFillRenderData(fill, tile = state.tri, design = { ink: state.ink, fills: state.fills }) {
     if (!tile) return null;
-    let discoveredData = null;
     const designInkIdSet = new Set(design.ink.map((ink) => ink.id).filter((id) => isValidInkId(id)));
     const hasBoundaryIds = Array.isArray(fill.boundaryInkIds);
-    const boundaryIdsValid = hasBoundaryIds && fill.boundaryInkIds.every((id) => designInkIdSet.has(id));
-
-    if (!hasBoundaryIds || !boundaryIdsValid) {
-      const discovered = discoverFillBoundaryDefinition(fill, tile, design);
-      if (!discovered) return null;
-      fill.boundaryInkIds = discovered.boundaryInkIds;
-      fill.usesTileBoundary = !!discovered.usesTileBoundary;
-      discoveredData = discovered.data;
-    }
-
-    const boundaryKey = fill.boundaryInkIds.join(",");
-    const key = `${getFillCacheKey()}:${tile.shape}:${tile.side}:${boundaryKey}:${fill.usesTileBoundary ? 1 : 0}`;
+    const hasExplicitBoundaryIds = hasBoundaryIds && fill.boundaryInkIds.length > 0;
+    const boundaryIdsValid = hasExplicitBoundaryIds && fill.boundaryInkIds.every((id) => designInkIdSet.has(id));
+    const preBoundaryIds = hasExplicitBoundaryIds && boundaryIdsValid ? fill.boundaryInkIds : [];
+    const preBoundaryKey = preBoundaryIds.join(",");
+    const preKey = `${getFillCacheKey()}:${tile.shape}:${preBoundaryKey}:${fill.usesTileBoundary ? 1 : 0}`;
     const cached = fillCache.get(fill);
-    if (cached && cached.key === key) return cached.data;
-    const data = discoveredData || computeFillMaskAtSeed(fill, tile, design, fill.boundaryInkIds);
-    fillCache.set(fill, { key, data });
+    if (cached && cached.key === preKey) return cached.data;
+
+    // On cache miss (common after undo/redo), re-discover from full ink so we do not
+    // replay stale/incomplete boundary subsets that can spill a fill across the tile.
+    const discovered = discoverFillBoundaryDefinition(fill, tile, design);
+    if (!discovered) return null;
+    if (Array.isArray(discovered.boundaryInkIds) && discovered.boundaryInkIds.length) {
+      fill.boundaryInkIds = discovered.boundaryInkIds;
+    } else {
+      delete fill.boundaryInkIds;
+    }
+    fill.usesTileBoundary = !!discovered.usesTileBoundary;
+
+    const boundaryIds = Array.isArray(fill.boundaryInkIds) ? fill.boundaryInkIds : [];
+    const boundaryKey = boundaryIds.join(",");
+    const key = `${getFillCacheKey()}:${tile.shape}:${boundaryKey}:${fill.usesTileBoundary ? 1 : 0}`;
+    const data = discovered.data || computeFillMaskAtSeed(fill, tile, design, null);
+    fillCache.set(fill, { key, data, shape: tile.shape, side: tile.side });
     return data;
+  }
+
+  function getFillRenderCacheKey(fill, tile) {
+    const boundaryIds = Array.isArray(fill?.boundaryInkIds) ? fill.boundaryInkIds : [];
+    const boundaryKey = boundaryIds.join(",");
+    return `${getFillCacheKey()}:${tile.shape}:${boundaryKey}:${fill?.usesTileBoundary ? 1 : 0}`;
+  }
+
+  function getCachedFillRenderData(fill, tile) {
+    if (!fill || !tile) return null;
+    const cached = fillCache.get(fill);
+    if (!cached) return null;
+    if (cached.key !== getFillRenderCacheKey(fill, tile)) return null;
+    const side = Number(cached.side);
+    return {
+      data: cached.data,
+      side: Number.isFinite(side) && side > 0 ? side : (tile.side || 1),
+    };
+  }
+
+  function getStaleFillRenderEntry(fill, tile) {
+    if (!fill || !tile) return null;
+    const cached = fillCache.get(fill);
+    if (!cached || !cached.data) return null;
+    let shape = cached.shape;
+    let side = Number(cached.side);
+    if (!shape || !Number.isFinite(side) || side <= 0) {
+      const parts = typeof cached.key === "string" ? cached.key.split(":") : [];
+      const shapeIdx = parts.findIndex((part) => SHAPES.includes(part));
+      if (!shape && shapeIdx >= 0) shape = parts[shapeIdx];
+      if ((!Number.isFinite(side) || side <= 0) && shapeIdx >= 0 && shapeIdx + 1 < parts.length) {
+        const maybeSide = Number(parts[shapeIdx + 1]);
+        if (Number.isFinite(maybeSide) && maybeSide > 0) side = maybeSide;
+      }
+    }
+    if (shape !== tile.shape) return null;
+    if (!Number.isFinite(side) || side <= 0) side = tile.side || 1;
+    return { data: cached.data, side };
+  }
+
+  function getFillRenderDataForFrame(
+    fill,
+    tile = state.tri,
+    design = { ink: state.ink, fills: state.fills },
+    { allowCompute = true, allowDefer = true } = {}
+  ) {
+    const cached = getCachedFillRenderData(fill, tile);
+    if (cached) return { data: cached.data, scale: (tile.side || 1) / (cached.side || 1) };
+    const stale = getStaleFillRenderEntry(fill, tile);
+    if (!allowCompute) {
+      if (stale) return { data: stale.data, scale: (tile.side || 1) / (stale.side || 1) };
+      return null;
+    }
+    if (allowDefer && state.fillComputeOpsThisFrame >= 1) {
+      if (allowDefer) state.fillComputeDeferred = true;
+      if (stale) {
+        return { data: stale.data, scale: (tile.side || 1) / (stale.side || 1) };
+      }
+      return null;
+    }
+    state.fillComputeOpsThisFrame += 1;
+    state.fillComputedThisFrame = true;
+    const data = getFillRenderData(fill, tile, design);
+    return data ? { data, scale: 1 } : null;
+  }
+
+  function getFillMaskBitmapForColor(fillData, color) {
+    if (!fillData?.bmp) return null;
+    const key = typeof color === "string" ? color : DEFAULT_FILL_COLOR;
+    if (fillData.colorBmp && fillData.colorBmpKey === key) return fillData.colorBmp;
+
+    const bmp = document.createElement("canvas");
+    bmp.width = fillData.bmp.width;
+    bmp.height = fillData.bmp.height;
+    const g = bmp.getContext("2d");
+    if (!g) return fillData.bmp;
+    g.fillStyle = key;
+    g.fillRect(0, 0, bmp.width, bmp.height);
+    g.globalCompositeOperation = "destination-in";
+    g.drawImage(fillData.bmp, 0, 0);
+    fillData.colorBmp = bmp;
+    fillData.colorBmpKey = key;
+    return bmp;
+  }
+
+  function drawFillMaskWithColor(targetCtx, fillData, color, scale = 1) {
+    const bmp = getFillMaskBitmapForColor(fillData, color);
+    if (!bmp) return;
+    const s = Number.isFinite(scale) && scale > 0 ? scale : 1;
+    targetCtx.drawImage(
+      bmp,
+      fillData.minX * s,
+      fillData.minY * s,
+      fillData.wLocal * s,
+      fillData.hLocal * s
+    );
   }
 
   function mulberry32(a) {
@@ -1440,7 +1737,8 @@ export function mountDesigner(root) {
     viewH = state.vh,
     sourceTiles = state.primaryTiles,
     renderDpr = state.dpr,
-    drawTileOutlines = true
+    drawTileOutlines = true,
+    allowFillCompute = false
   ) {
     if (!sourceTiles.length) return;
     const ctx = targetCtx;
@@ -1506,13 +1804,13 @@ export function mountDesigner(root) {
       const prevSmoothing = ctx.imageSmoothingEnabled;
       ctx.imageSmoothingEnabled = false;
       for (const fill of design.fills) {
-        const f = getFillRenderData(fill, primary, design);
-        if (!f) continue;
+        const fillFrameData = getFillRenderDataForFrame(fill, primary, design, { allowCompute: allowFillCompute, allowDefer: false });
+        if (!fillFrameData?.data) continue;
         ctx.save();
         ctx.translate(center.x, center.y);
         ctx.rotate(designAng);
         ctx.scale(scale, scale);
-        ctx.drawImage(f.bmp, f.minX, f.minY, f.wLocal, f.hLocal);
+        drawFillMaskWithColor(ctx, fillFrameData.data, fillColorForFill(fill), fillFrameData.scale);
         ctx.restore();
       }
       ctx.imageSmoothingEnabled = prevSmoothing;
@@ -2383,11 +2681,11 @@ export function mountDesigner(root) {
     ctx.save();
     clipPrimaryTile(tile);
     for (const fill of design.fills) {
-      const f = getFillRenderData(fill, tile, design);
-      if (!f) continue;
+      const fillFrameData = getFillRenderDataForFrame(fill, tile, design, { allowCompute: true, allowDefer: true });
+      if (!fillFrameData?.data) continue;
       ctx.save();
       ctx.translate(tile.center.x, tile.center.y);
-      ctx.drawImage(f.bmp, f.minX, f.minY, f.wLocal, f.hLocal);
+      drawFillMaskWithColor(ctx, fillFrameData.data, fillColorForFill(fill), fillFrameData.scale);
       ctx.restore();
     }
     ctx.restore();
@@ -2975,6 +3273,16 @@ export function mountDesigner(root) {
     state.fills = target;
   }
 
+  function ensureFillClosedByInk(fill, fillData, tile = state.tri, design = { ink: state.ink, fills: state.fills }) {
+    if (!fill || !fillData || !tile) return false;
+    if (typeof fillData.closedByInk === "boolean") return fillData.closedByInk;
+    const seedLocal = pointWorldToLocal(fill, tile);
+    const boundaryInk = fillBoundaryInkList(design, fill.boundaryInkIds);
+    const closed = isSeedClosedByBoundaryInk(seedLocal, tile, boundaryInk);
+    fillData.closedByInk = closed;
+    return closed;
+  }
+
   function pruneInvalidFillsAfterInkChange(changedInkIds = [], deletedInkIds = []) {
     const changedSet = new Set(changedInkIds);
     const deletedSet = new Set(deletedInkIds);
@@ -2996,7 +3304,7 @@ export function mountDesigner(root) {
 
       const data = getFillRenderData(fill);
       if (!data) continue;
-      if (hasBoundaryChange && !data.closedByInk) continue;
+      if (hasBoundaryChange && !ensureFillClosedByInk(fill, data)) continue;
       kept.push(fill);
     }
 
@@ -3133,9 +3441,12 @@ export function mountDesigner(root) {
   }
 
   function render() {
+    state.fillComputeOpsThisFrame = 0;
+    state.fillComputeDeferred = false;
+    state.fillComputedThisFrame = false;
     clearScreen();
 
-    renderBackgroundTiling();
+    renderBackgroundTiling(ctx, state.vw, state.vh, state.primaryTiles, state.dpr, true, false);
     if (!state.primaryTiles.length) return;
     const tiles = [...state.primaryTiles];
     tiles.sort((a, b) => (a.id === state.activePrimaryTileId ? 1 : 0) - (b.id === state.activePrimaryTileId ? 1 : 0));
@@ -3170,6 +3481,7 @@ export function mountDesigner(root) {
     drawSingleTileSetControls();
 
     drawPreviewUnclippedBlue();
+    if (state.fillComputeDeferred || state.fillComputedThisFrame) requestRender();
   }
 
   function getPointer(e) {
@@ -3257,20 +3569,26 @@ export function mountDesigner(root) {
         state.pointerDown = false;
         return;
       }
-      pushUndo();
       const seed = pointLocalToWorld(local);
       const discovered = discoverFillBoundaryDefinition(seed, state.tri, { ink: state.ink, fills: state.fills });
       if (discovered) {
+        pushUndo();
         const fill = {
           x: seed.x,
           y: seed.y,
-          boundaryInkIds: discovered.boundaryInkIds,
+          color: state.fillColor,
           usesTileBoundary: discovered.usesTileBoundary,
         };
+        if (Array.isArray(discovered.boundaryInkIds) && discovered.boundaryInkIds.length) {
+          fill.boundaryInkIds = discovered.boundaryInkIds;
+        }
         state.fills.push(fill);
+        const boundaryIds = Array.isArray(fill.boundaryInkIds) ? fill.boundaryInkIds : [];
         fillCache.set(fill, {
-          key: `${getFillCacheKey()}:${state.tri.shape}:${state.tri.side}:${fill.boundaryInkIds.join(",")}:${fill.usesTileBoundary ? 1 : 0}`,
+          key: `${getFillCacheKey()}:${state.tri.shape}:${boundaryIds.join(",")}:${fill.usesTileBoundary ? 1 : 0}`,
           data: discovered.data,
+          shape: state.tri.shape,
+          side: state.tri.side,
         });
       }
       state.pointerDown = false;
@@ -3406,6 +3724,10 @@ export function mountDesigner(root) {
     state.tool = tool;
     syncToolMenu();
     syncToolPalette();
+    if (tool !== "fill" && state.fillColorDrawerOpen) {
+      state.fillColorDrawerOpen = false;
+      syncFillColorControls();
+    }
     state.pointerDown = false;
     state.drawing = null;
     state.selectionDrag = null;
@@ -3439,6 +3761,10 @@ export function mountDesigner(root) {
 
   function syncViewMenu() {
     setSelectableState(itemViewTools, state.showToolsPalette);
+    if (!state.showToolsPalette && state.fillColorDrawerOpen) {
+      state.fillColorDrawerOpen = false;
+      syncFillColorControls();
+    }
     toolPalette.classList.toggle("hidden", !state.showToolsPalette);
   }
 
@@ -3449,6 +3775,89 @@ export function mountDesigner(root) {
       btn.classList.toggle("selected", selected);
       btn.setAttribute("aria-pressed", selected ? "true" : "false");
     }
+  }
+
+  function getFillPaletteColors() {
+    return [...DEFAULT_FILL_COLORS, ...state.customFillColors];
+  }
+
+  function renderFillColorSwatches() {
+    palFillSwatches.textContent = "";
+    const colors = getFillPaletteColors();
+    for (const color of colors) {
+      const isCustom = !DEFAULT_FILL_COLOR_SET.has(color);
+      const wrap = document.createElement("div");
+      wrap.className = `fill-color-swatch-wrap${isCustom ? " custom" : ""}`;
+
+      const swatchBtn = document.createElement("button");
+      swatchBtn.type = "button";
+      swatchBtn.className = `fill-color-swatch-btn${color === state.fillColor ? " selected" : ""}`;
+      swatchBtn.dataset.fillColorSelect = color;
+      swatchBtn.title = `Use ${color}`;
+      swatchBtn.setAttribute("aria-label", `Use ${color}`);
+      swatchBtn.style.backgroundColor = color;
+      wrap.append(swatchBtn);
+
+      if (isCustom) {
+        const del = document.createElement("button");
+        del.type = "button";
+        del.className = "fill-color-swatch-delete";
+        del.dataset.fillColorDelete = color;
+        del.title = `Delete ${color}`;
+        del.setAttribute("aria-label", `Delete ${color}`);
+        del.textContent = "x";
+        wrap.append(del);
+      }
+      palFillSwatches.append(wrap);
+    }
+  }
+
+  function syncFillColorControls() {
+    state.fillColor = normalizeFillColor(state.fillColor, DEFAULT_FILL_COLOR);
+    state.customFillColors = sanitizeCustomFillColors(state.customFillColors);
+    if (!DEFAULT_FILL_COLOR_SET.has(state.fillColor) && !state.customFillColors.includes(state.fillColor)) {
+      state.customFillColors.push(state.fillColor);
+    }
+    palFillColor.style.setProperty("--fill-color", state.fillColor);
+    palFillColor.setAttribute("aria-expanded", state.fillColorDrawerOpen ? "true" : "false");
+    palFillColorDrawer.classList.toggle("open", state.fillColorDrawerOpen);
+    palFillColorDrawer.setAttribute("aria-hidden", state.fillColorDrawerOpen ? "false" : "true");
+    palFillColorPicker.value = state.fillColor;
+    renderFillColorSwatches();
+  }
+
+  function setFillColorDrawerOpen(open) {
+    state.fillColorDrawerOpen = !!open;
+    syncFillColorControls();
+  }
+
+  function setFillColorValue(color, closeDrawer = false) {
+    const next = normalizeFillColor(color, state.fillColor);
+    if (!next) return;
+    state.fillColor = next;
+    if (closeDrawer) state.fillColorDrawerOpen = false;
+    syncFillColorControls();
+  }
+
+  function addCustomFillColor(color) {
+    const next = normalizeFillColor(color);
+    if (!next) return;
+    if (!DEFAULT_FILL_COLOR_SET.has(next) && !state.customFillColors.includes(next)) {
+      state.customFillColors.push(next);
+    }
+    state.fillColor = next;
+    state.fillColorDrawerOpen = false;
+    syncFillColorControls();
+  }
+
+  function removeCustomFillColor(color) {
+    const next = normalizeFillColor(color);
+    if (!next) return;
+    const idx = state.customFillColors.indexOf(next);
+    if (idx < 0) return;
+    state.customFillColors.splice(idx, 1);
+    if (state.fillColor === next) state.fillColor = DEFAULT_FILL_COLOR;
+    syncFillColorControls();
   }
 
   function syncShapeDialog() {
@@ -3573,6 +3982,9 @@ export function mountDesigner(root) {
     state.activePrimaryTileId = loaded.activePrimaryTileId;
     state.nextPrimaryTileId = loaded.nextPrimaryTileId;
     state.nextInkId = loaded.nextInkId;
+    state.fillColor = loaded.fillColor;
+    state.customFillColors = loaded.customFillColors;
+    state.fillColorDrawerOpen = false;
     state.pointerDown = false;
     state.drawing = null;
     state.selectionDrag = null;
@@ -3599,6 +4011,7 @@ export function mountDesigner(root) {
     syncGridMenu();
     syncViewMenu();
     syncToolPalette();
+    syncFillColorControls();
     syncHUD();
     updateHoverPick();
     requestRender();
@@ -4137,7 +4550,7 @@ export function mountDesigner(root) {
       for (const fill of design.fills) {
         const d = buildFillBoundarySvgPath(fill, tile, design);
         if (!d) continue;
-        fillPaths.push(`      <path d="${d}" fill="#000" fill-rule="evenodd"/>`);
+        fillPaths.push(`      <path d="${d}" fill="${fillColorForFill(fill)}" fill-rule="evenodd"/>`);
       }
 
       const inkPaths = [];
@@ -4196,7 +4609,7 @@ export function mountDesigner(root) {
     const exportTiles = state.primaryTiles.map((tile) =>
       buildPrimaryTile(tile.id, tile.shape, tile.side / Math.max(1, state.dpr), v(width * 0.5, height * 0.5))
     );
-    renderBackgroundTiling(exportCtx, width, height, exportTiles, 1, false);
+    renderBackgroundTiling(exportCtx, width, height, exportTiles, 1, false, true);
     triggerPngDownload(exportCanvas, width, height);
     closeExportDialog();
   }
@@ -4219,12 +4632,16 @@ export function mountDesigner(root) {
     state.activePrimaryTileId = 1;
     state.nextPrimaryTileId = 2;
     state.nextInkId = 1;
+    state.fillColor = DEFAULT_FILL_COLOR;
+    state.customFillColors = [];
+    state.fillColorDrawerOpen = false;
     syncActiveDesignRefs();
     state.undoStack.length = 0;
     state.redoStack.length = 0;
     markInkChanged();
     recomputeBigTriangle();
     recomputeGrid();
+    syncFillColorControls();
     syncHUD();
     requestRender();
   }
@@ -4449,9 +4866,13 @@ export function mountDesigner(root) {
     const target = e.target;
     if (!(target instanceof Node)) {
       openMenu(null);
+      if (state.fillColorDrawerOpen) setFillColorDrawerOpen(false);
       return;
     }
     if (!menuBar.contains(target)) openMenu(null);
+    if (state.fillColorDrawerOpen && !palFillColorWrap.contains(target)) {
+      setFillColorDrawerOpen(false);
+    }
   }
 
   function onMenuClick(e) {
@@ -4468,10 +4889,33 @@ export function mountDesigner(root) {
   function onPaletteClick(e) {
     const target = e.target;
     if (!(target instanceof Element)) return;
+
+    const deleteBtn = target.closest("[data-fill-color-delete]");
+    if (deleteBtn instanceof HTMLButtonElement && toolPalette.contains(deleteBtn)) {
+      const color = deleteBtn.dataset.fillColorDelete;
+      if (color) removeCustomFillColor(color);
+      return;
+    }
+
+    const swatchBtn = target.closest("[data-fill-color-select]");
+    if (swatchBtn instanceof HTMLButtonElement && toolPalette.contains(swatchBtn)) {
+      const color = swatchBtn.dataset.fillColorSelect;
+      if (color) setFillColorValue(color, true);
+      return;
+    }
+
     const btn = target.closest(".palette-btn");
     if (!(btn instanceof HTMLButtonElement) || !toolPalette.contains(btn) || btn.disabled) return;
     if (btn.dataset.tool) {
       setTool(btn.dataset.tool);
+      return;
+    }
+    if (btn.dataset.paletteAction === "fill-color-toggle") {
+      setFillColorDrawerOpen(!state.fillColorDrawerOpen);
+      return;
+    }
+    if (btn.dataset.paletteAction === "fill-color-add") {
+      palFillColorPicker.click();
       return;
     }
     if (btn.dataset.paletteAction === "undo") {
@@ -4481,6 +4925,12 @@ export function mountDesigner(root) {
     if (btn.dataset.paletteAction === "redo") {
       onRedo();
     }
+  }
+
+  function onFillColorPickerChange(e) {
+    const target = e.target;
+    if (!(target instanceof HTMLInputElement)) return;
+    addCustomFillColor(target.value);
   }
 
   function onShapeOptionClick(e) {
@@ -4547,6 +4997,10 @@ export function mountDesigner(root) {
       return;
     }
     if (e.key === "Escape") {
+      if (state.fillColorDrawerOpen) {
+        setFillColorDrawerOpen(false);
+        return;
+      }
       openMenu(null);
       state.pointerDown = false;
       state.drawing = null;
@@ -4572,6 +5026,7 @@ export function mountDesigner(root) {
   on(menuBar, "pointerleave", onMenuPointerLeave);
   on(menuBar, "click", onMenuClick);
   on(toolPalette, "click", onPaletteClick);
+  on(palFillColorPicker, "change", onFillColorPickerChange);
   on(shapeOptionList, "click", onShapeOptionClick);
   on(btnShapeClose, "click", onShapeDialogCancel);
   on(exportDialogBackdrop, "pointerdown", onExportBackdropPointerDown);
@@ -4591,6 +5046,7 @@ export function mountDesigner(root) {
     syncGridMenu();
     syncViewMenu();
     syncToolPalette();
+    syncFillColorControls();
     syncHUD();
     resize();
     requestRender();

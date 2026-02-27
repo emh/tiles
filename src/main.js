@@ -413,6 +413,48 @@ function App() {
       paletteButton({ "data-tool": "line", class: "selected" }, "slash", "Line (2)"),
       paletteButton({ "data-tool": "circle" }, "circle", "Circle (3)"),
       paletteButton({ "data-tool": "fill" }, "paint-bucket", "Fill (4)"),
+      h(
+        "div",
+        { id: "palFillColorWrap", class: "palette-fill-color-wrap" },
+        h(
+          "button",
+          withClass("palette-btn palette-fill-color-btn", {
+            id: "palFillColor",
+            type: "button",
+            title: "Fill color",
+            "aria-label": "Fill color",
+            "aria-haspopup": "true",
+            "aria-expanded": "false",
+            "aria-controls": "palFillColorDrawer",
+            "data-palette-action": "fill-color-toggle",
+          }),
+          h("span", { class: "palette-fill-color-chip", "aria-hidden": "true" })
+        ),
+        h(
+          "div",
+          { id: "palFillColorDrawer", class: "fill-color-drawer", "aria-hidden": "true" },
+          h("div", { id: "palFillSwatches", class: "fill-color-swatches", role: "group", "aria-label": "Fill colors" }),
+          h(
+            "button",
+            withClass("palette-btn fill-color-add-btn", {
+              id: "palFillColorAdd",
+              type: "button",
+              title: "Add color",
+              "aria-label": "Add color",
+              "data-palette-action": "fill-color-add",
+            }),
+            "+"
+          )
+        ),
+        h("input", {
+          id: "palFillColorPicker",
+          type: "color",
+          value: "#000000",
+          class: "sr-only",
+          tabIndex: -1,
+          "aria-hidden": "true",
+        })
+      ),
       paletteButton({ "data-tool": "delete" }, "eraser", "Delete (D)"),
       h("div", { class: "palette-sep" }),
       paletteButton({ id: "palUndo", "data-palette-action": "undo" }, "undo-2", "Undo (Z)"),
