@@ -129,12 +129,26 @@ export function mountDesigner(root) {
     const d1 = s(p, a, b);
     const d2 = s(p, b, c);
     const d3 = s(p, c, a);
-    const hasNeg = d1 < 0 || d2 < 0 || d3 < 0;
-    const hasPos = d1 > 0 || d2 > 0 || d3 > 0;
+    const eps = 1e-6;
+    const hasNeg = d1 < -eps || d2 < -eps || d3 < -eps;
+    const hasPos = d1 > eps || d2 > eps || d3 > eps;
     return !(hasNeg && hasPos);
   }
 
+  function pointOnSegment(p, a, b, eps = 1e-4) {
+    const ab = sub(b, a);
+    const abLenSq = dot(ab, ab);
+    if (abLenSq <= eps * eps) return len(sub(p, a)) <= eps;
+    const t = dot(sub(p, a), ab) / abLenSq;
+    if (t < -eps || t > 1 + eps) return false;
+    const proj = add(a, mul(ab, clamp(t, 0, 1)));
+    return len(sub(p, proj)) <= eps;
+  }
+
   function pointInPoly(p, poly) {
+    for (let i = 0, j = poly.length - 1; i < poly.length; j = i, i += 1) {
+      if (pointOnSegment(p, poly[j], poly[i])) return true;
+    }
     let inside = false;
     for (let i = 0, j = poly.length - 1; i < poly.length; j = i, i += 1) {
       const a = poly[i];
@@ -2739,6 +2753,7 @@ export function mountDesigner(root) {
 
   function updateSelectionDrag(pLocal) {
     if (!state.selectionDrag) return;
+    if (!pLocal) return;
     const basePreview = previewInkFromDrag(state.selectionDrag, pLocal);
     const preview = snapSelectionPreviewToControlPoints(state.selectionDrag, basePreview);
     if (!preview) return;
@@ -3140,6 +3155,18 @@ export function mountDesigner(root) {
     return baseLocal;
   }
 
+  function shouldGridSnapSelectionHandle(handle) {
+    return handle === "line-a" || handle === "line-b" || handle === "circle-center" || handle === "circle-radius";
+  }
+
+  function localForSelectionDragFromHover() {
+    if (!state.hover) return null;
+    if (state.selectionDrag && shouldGridSnapSelectionHandle(state.selectionDrag.handle)) {
+      return state.hover.snapLocal;
+    }
+    return state.hover.local;
+  }
+
   function onPointerDown(e) {
     if (state.shapeDialogOpen || state.exportDialogOpen) return;
     const p = getPointer(e);
@@ -3225,7 +3252,7 @@ export function mountDesigner(root) {
 
     if (state.pointerDown) {
       if (state.selectionDrag) {
-        updateSelectionDrag(state.hover.local);
+        updateSelectionDrag(localForSelectionDragFromHover());
       } else if (state.drawing) {
         const local = localForToolFromHover(state.drawing.tool);
         state.drawing.curLocal = local;
@@ -3247,7 +3274,7 @@ export function mountDesigner(root) {
     }
 
     if (state.selectionDrag) {
-      if (state.hover) updateSelectionDrag(state.hover.local);
+      updateSelectionDrag(localForSelectionDragFromHover());
       commitSelectionDrag();
       state.selectionDrag = null;
       requestRender();
