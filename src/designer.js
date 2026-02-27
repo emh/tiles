@@ -116,7 +116,8 @@ export function mountDesigner(root) {
   const BG_SCALE = 0.165;
   const BG_SEED = 1337;
   const BG_CLIP_PAD_SCREEN_PX = 0.9;
-  const BG_CLIP_PAD_EXPORT_PX = 2.2;
+  const BG_CLIP_PAD_EXPORT_PX = 2.6;
+  const EXPORT_MAX_PIXELS = 96000000;
   const SAVE_DOC_VERSION = 2;
   const DEFAULT_FILL_COLOR = "#000000";
   const DEFAULT_FILL_COLORS = ["#ffffff", "#000000", "#ff0000", "#00ff00", "#0000ff", "#ffff00", "#00ffff", "#ff00ff"];
@@ -1528,8 +1529,8 @@ export function mountDesigner(root) {
       cur = next;
     }
 
-    // Include touched tile-boundary wall pixels to avoid seams when tiling fills in the wallpaper background.
     if (usesTileBoundary) {
+      // Include tile-boundary wall pixels adjacent to the filled region to avoid seams when tiling.
       let nextCur = cur;
       for (let it = 0; it < 4; it += 1) {
         const next = new Uint8Array(nextCur);
@@ -1670,10 +1671,16 @@ export function mountDesigner(root) {
     fill,
     tile = state.tri,
     design = { ink: state.ink, fills: state.fills },
-    { allowCompute = true, allowDefer = true } = {}
+    { allowCompute = true, allowDefer = true, requireExactScale = false } = {}
   ) {
     const cached = getCachedFillRenderData(fill, tile);
-    if (cached) return { data: cached.data, scale: (tile.side || 1) / (cached.side || 1) };
+    if (cached) {
+      const scale = (tile.side || 1) / (cached.side || 1);
+      const exactScale = Math.abs(scale - 1) <= 1e-6;
+      if (!requireExactScale || exactScale) {
+        return { data: cached.data, scale };
+      }
+    }
     const stale = getStaleFillRenderEntry(fill, tile);
     if (!allowCompute) {
       if (stale) return { data: stale.data, scale: (tile.side || 1) / (stale.side || 1) };
@@ -1689,7 +1696,12 @@ export function mountDesigner(root) {
     state.fillComputeOpsThisFrame += 1;
     state.fillComputedThisFrame = true;
     const data = getFillRenderData(fill, tile, design);
-    return data ? { data, scale: 1 } : null;
+    if (!data) return null;
+    const refreshed = getCachedFillRenderData(fill, tile);
+    if (refreshed) {
+      return { data: refreshed.data, scale: (tile.side || 1) / (refreshed.side || 1) };
+    }
+    return { data, scale: 1 };
   }
 
   function getFillMaskBitmapForColor(fillData, color) {
@@ -1740,7 +1752,8 @@ export function mountDesigner(root) {
     sourceTiles = state.primaryTiles,
     renderDpr = state.dpr,
     drawTileOutlines = true,
-    allowFillCompute = false
+    allowFillCompute = false,
+    fillRenderMode = "bitmap"
   ) {
     if (!sourceTiles.length) return;
     const ctx = targetCtx;
@@ -1748,6 +1761,9 @@ export function mountDesigner(root) {
     const vh = viewH;
     const dpr = renderDpr;
     const mode = getTilingOption(state.tilingId);
+    const useVectorFills = fillRenderMode === "vector";
+    const useAtlasTiles = fillRenderMode === "atlas";
+    const vectorEdgeOverpaintPx = useVectorFills && allowFillCompute ? 0.9 * dpr : 0;
     const sourceTilesByShape = new Map();
     for (const tile of sourceTiles) {
       if (!sourceTilesByShape.has(tile.shape)) sourceTilesByShape.set(tile.shape, []);
@@ -1756,6 +1772,8 @@ export function mountDesigner(root) {
     const singleShapeTilesetMode = mode.shapes.length === 1 && sourceTiles.length > 1;
     const rnd = mulberry32(BG_SEED >>> 0);
     const clipPadPx = allowFillCompute ? BG_CLIP_PAD_EXPORT_PX : BG_CLIP_PAD_SCREEN_PX;
+    const vectorPathCache = new WeakMap();
+    const atlasCache = new WeakMap();
 
     function chooseRot(shape, base = 0) {
       const rots = ROTS_BY_SHAPE[shape] || [0];
@@ -1787,36 +1805,291 @@ export function mountDesigner(root) {
       return tiles[Math.floor(rnd() * tiles.length)];
     }
 
+    function normalizeAngle(a) {
+      let x = a % TAU;
+      if (x < 0) x += TAU;
+      return x;
+    }
+
+    function angleKey(a) {
+      return normalizeAngle(a).toFixed(6);
+    }
+
+    function pathPolyLocal(g, points) {
+      if (!points.length) return;
+      g.beginPath();
+      g.moveTo(points[0].x, points[0].y);
+      for (let i = 1; i < points.length; i += 1) g.lineTo(points[i].x, points[i].y);
+      g.closePath();
+    }
+
+    function polygonSignedArea(points) {
+      let s = 0;
+      for (let i = 0; i < points.length; i += 1) {
+        const p0 = points[i];
+        const p1 = points[(i + 1) % points.length];
+        s += p0.x * p1.y - p0.y * p1.x;
+      }
+      return s * 0.5;
+    }
+
+    function expandConvexPoly(points, delta) {
+      if (!points?.length || !Number.isFinite(delta) || delta <= 0) return points ? [...points] : [];
+      if (points.length < 3) return [...points];
+      const outwardSign = polygonSignedArea(points) >= 0 ? 1 : -1;
+      const lines = [];
+      for (let i = 0; i < points.length; i += 1) {
+        const p0 = points[i];
+        const p1 = points[(i + 1) % points.length];
+        const edge = sub(p1, p0);
+        const L = len(edge) || 1;
+        const dir = v(edge.x / L, edge.y / L);
+        const normal = v(outwardSign * dir.y, outwardSign * -dir.x);
+        lines.push({
+          a: add(p0, mul(normal, delta)),
+          dir,
+          normal,
+        });
+      }
+
+      const out = [];
+      for (let i = 0; i < points.length; i += 1) {
+        const prev = lines[(i - 1 + points.length) % points.length];
+        const next = lines[i];
+        const den = cross2(prev.dir, next.dir);
+        if (Math.abs(den) <= 1e-9) {
+          const avgN = normalizeOr(add(prev.normal, next.normal), next.normal);
+          out.push(add(points[i], mul(avgN, delta)));
+          continue;
+        }
+        const t = cross2(sub(next.a, prev.a), next.dir) / den;
+        out.push(add(prev.a, mul(prev.dir, t)));
+      }
+      return out;
+    }
+
+    function getVectorFillPath(primary, design, fill) {
+      if (!primary || !design || !fill) return null;
+      let byFill = vectorPathCache.get(primary);
+      if (!byFill) {
+        byFill = new WeakMap();
+        vectorPathCache.set(primary, byFill);
+      }
+      if (byFill.has(fill)) return byFill.get(fill);
+      const d = buildFillBoundarySvgPath(fill, primary, design);
+      if (!d) {
+        byFill.set(fill, null);
+        return null;
+      }
+      let path = null;
+      try {
+        path = new Path2D(d);
+      } catch {
+        path = null;
+      }
+      byFill.set(fill, path);
+      return path;
+    }
+
+    function drawAtlasFill(g, primary, design, fill, designAng, scale) {
+      const path = getVectorFillPath(primary, design, fill);
+      if (path) {
+        g.save();
+        g.rotate(designAng);
+        g.scale(scale, scale);
+        g.fillStyle = fillColorForFill(fill);
+        g.fill(path, "evenodd");
+        g.restore();
+        return;
+      }
+      // Fallback for pathological topologies where vector loop extraction fails.
+      const fillFrameData = getFillRenderDataForFrame(fill, primary, design, {
+        allowCompute: true,
+        allowDefer: false,
+        requireExactScale: true,
+      });
+      if (!fillFrameData?.data) return;
+      g.save();
+      g.rotate(designAng);
+      g.scale(scale, scale);
+      drawFillMaskWithColor(g, fillFrameData.data, fillColorForFill(fill), fillFrameData.scale);
+      g.restore();
+    }
+
+    function drawAtlasInk(g, primary, design, designAng, scale) {
+      g.strokeStyle = "#000";
+      g.lineWidth = 2 * dpr;
+      g.lineCap = "round";
+      g.lineJoin = "round";
+      for (const o of design.ink) {
+        const localInk = inkWorldToLocal(o, primary);
+        if (localInk.type === "line") {
+          const p0 = mul(rot(localInk.a, designAng), scale);
+          const p1 = mul(rot(localInk.b, designAng), scale);
+          g.beginPath();
+          g.moveTo(p0.x, p0.y);
+          g.lineTo(p1.x, p1.y);
+          g.stroke();
+        } else if (localInk.type === "circle") {
+          const cc = mul(rot(localInk.c, designAng), scale);
+          g.beginPath();
+          g.arc(cc.x, cc.y, localInk.r * scale, 0, TAU);
+          g.stroke();
+        } else if (localInk.type === "arc") {
+          const cc = mul(rot(localInk.c, designAng), scale);
+          g.beginPath();
+          g.arc(
+            cc.x,
+            cc.y,
+            localInk.r * scale,
+            localInk.a0 + designAng,
+            localInk.a1 + designAng,
+            false
+          );
+          g.stroke();
+        }
+      }
+    }
+
+    function getTileAtlas(primary, design, side, geomAng, designAng) {
+      if (!primary || !design) return null;
+      let byKey = atlasCache.get(primary);
+      if (!byKey) {
+        byKey = new Map();
+        atlasCache.set(primary, byKey);
+      }
+      const key = `${side.toFixed(5)}:${angleKey(geomAng)}:${angleKey(designAng)}`;
+      const existing = byKey.get(key);
+      if (existing) return existing;
+
+      const basePoly = shapePolyLocal(primary.shape, side).map((p) => rot(p, geomAng));
+      const overlap = allowFillCompute ? 0.72 * dpr : 0;
+      const clipPoly = overlap > 0 ? expandConvexPoly(basePoly, overlap) : basePoly;
+      const b = polyBounds(clipPoly);
+      const pad = Math.max(2, Math.ceil(3 * dpr + overlap));
+      const w = Math.max(1, Math.ceil(b.w + pad * 2));
+      const h = Math.max(1, Math.ceil(b.h + pad * 2));
+      const off = document.createElement("canvas");
+      off.width = w;
+      off.height = h;
+      const g = off.getContext("2d");
+      if (!g) return null;
+
+      const centerPx = v(-b.minX + pad, -b.minY + pad);
+      g.clearRect(0, 0, w, h);
+      g.save();
+      g.translate(centerPx.x, centerPx.y);
+      pathPolyLocal(g, clipPoly);
+      g.clip();
+
+      const scale = side / primary.side;
+      for (const fill of design.fills) {
+        drawAtlasFill(g, primary, design, fill, designAng, scale);
+      }
+      drawAtlasInk(g, primary, design, designAng, scale);
+      g.restore();
+
+      const out = { canvas: off, centerPx };
+      byKey.set(key, out);
+      return out;
+    }
+
     function drawShapeTile(primary, center, side, geomAng = 0, designAng = geomAng) {
       const design = getDesignForTile(primary);
       if (!primary || !design) return;
       const shape = primary.shape;
       const points = shapePolyLocal(shape, side).map((p) => add(center, rot(p, geomAng)));
-      const clipPad = clipPadPx * dpr;
-      const clipPoints = points.map((p) => {
-        const dv = sub(p, center);
-        const L = len(dv) || 1;
-        return add(center, mul(dv, (L + clipPad) / L));
-      });
-
-      ctx.save();
-      pathPoly(clipPoints);
-      ctx.clip();
-
       const scale = side / primary.side;
-      const prevSmoothing = ctx.imageSmoothingEnabled;
-      ctx.imageSmoothingEnabled = false;
-      for (const fill of design.fills) {
-        const fillFrameData = getFillRenderDataForFrame(fill, primary, design, { allowCompute: allowFillCompute, allowDefer: false });
-        if (!fillFrameData?.data) continue;
-        ctx.save();
-        ctx.translate(center.x, center.y);
-        ctx.rotate(designAng);
-        ctx.scale(scale, scale);
-        drawFillMaskWithColor(ctx, fillFrameData.data, fillColorForFill(fill), fillFrameData.scale);
-        ctx.restore();
+      if (useAtlasTiles) {
+        const atlas = getTileAtlas(primary, design, side, geomAng, designAng);
+        if (atlas?.canvas) {
+          const prevSmoothing = ctx.imageSmoothingEnabled;
+          ctx.imageSmoothingEnabled = true;
+          ctx.drawImage(atlas.canvas, center.x - atlas.centerPx.x, center.y - atlas.centerPx.y);
+          ctx.imageSmoothingEnabled = prevSmoothing;
+          return points;
+        }
       }
-      ctx.imageSmoothingEnabled = prevSmoothing;
+      if (!useVectorFills) {
+        const clipPad = clipPadPx * dpr;
+        const clipPoints = points.map((p) => {
+          const dv = sub(p, center);
+          const L = len(dv) || 1;
+          return add(center, mul(dv, (L + clipPad) / L));
+        });
+
+        ctx.save();
+        pathPoly(clipPoints);
+        ctx.clip();
+
+        const prevSmoothing = ctx.imageSmoothingEnabled;
+        ctx.imageSmoothingEnabled = false;
+        for (const fill of design.fills) {
+          const fillFrameData = getFillRenderDataForFrame(fill, primary, design, {
+            allowCompute: allowFillCompute,
+            allowDefer: false,
+            requireExactScale: allowFillCompute,
+          });
+          if (!fillFrameData?.data) continue;
+          ctx.save();
+          ctx.translate(center.x, center.y);
+          ctx.rotate(designAng);
+          ctx.scale(scale, scale);
+          drawFillMaskWithColor(ctx, fillFrameData.data, fillColorForFill(fill), fillFrameData.scale);
+          ctx.restore();
+        }
+        ctx.imageSmoothingEnabled = prevSmoothing;
+        ctx.restore();
+      } else {
+        const tileLocalPoly = primary.polyLocal || shapePolyLocal(shape, primary.side);
+        for (const fill of design.fills) {
+          const path = getVectorFillPath(primary, design, fill);
+          if (path) {
+            ctx.save();
+            ctx.translate(center.x, center.y);
+            ctx.rotate(designAng);
+            ctx.scale(scale, scale);
+            const fillColor = fillColorForFill(fill);
+            ctx.fillStyle = fillColor;
+            ctx.fill(path, "evenodd");
+            if (vectorEdgeOverpaintPx > 0 && fill.usesTileBoundary && tileLocalPoly.length >= 3) {
+              ctx.save();
+              ctx.clip(path, "evenodd");
+              ctx.beginPath();
+              ctx.moveTo(tileLocalPoly[0].x, tileLocalPoly[0].y);
+              for (let i = 1; i < tileLocalPoly.length; i += 1) ctx.lineTo(tileLocalPoly[i].x, tileLocalPoly[i].y);
+              ctx.closePath();
+              ctx.strokeStyle = fillColor;
+              ctx.lineCap = "round";
+              ctx.lineJoin = "round";
+              ctx.lineWidth = vectorEdgeOverpaintPx / Math.max(scale, 1e-6);
+              ctx.stroke();
+              ctx.restore();
+            }
+            ctx.restore();
+            continue;
+          }
+          // Vector boundary extraction can fail on some complex topologies; fallback
+          // to the exact-scale bitmap mask so export never drops fills.
+          const fillFrameData = getFillRenderDataForFrame(fill, primary, design, {
+            allowCompute: true,
+            allowDefer: false,
+            requireExactScale: true,
+          });
+          if (!fillFrameData?.data) continue;
+          ctx.save();
+          ctx.translate(center.x, center.y);
+          ctx.rotate(designAng);
+          ctx.scale(scale, scale);
+          ctx.beginPath();
+          ctx.moveTo(tileLocalPoly[0].x, tileLocalPoly[0].y);
+          for (let i = 1; i < tileLocalPoly.length; i += 1) ctx.lineTo(tileLocalPoly[i].x, tileLocalPoly[i].y);
+          ctx.closePath();
+          ctx.clip();
+          drawFillMaskWithColor(ctx, fillFrameData.data, fillColorForFill(fill), fillFrameData.scale);
+          ctx.restore();
+        }
+      }
 
       ctx.strokeStyle = "#000";
       ctx.lineWidth = 2 * dpr;
@@ -1851,7 +2124,6 @@ export function mountDesigner(root) {
         }
       }
 
-      ctx.restore();
       return points;
     }
 
@@ -4270,9 +4542,14 @@ export function mountDesigner(root) {
 
   function buildFillBoundarySvgPath(fill, tile, design) {
     if (!fill || !tile || !design) return "";
+    const boundaryIds = Array.isArray(fill.boundaryInkIds) ? fill.boundaryInkIds : [];
+    if (!boundaryIds.length && fill.usesTileBoundary && tile.polyLocal?.length) {
+      return svgPathFromPoly(tile.polyLocal);
+    }
     const fillData = getFillRenderData(fill, tile, design);
-    if (!fillData || !Array.isArray(fill.boundaryInkIds)) return "";
-    const boundaryInk = fillBoundaryInkList(design, fill.boundaryInkIds).map((ink) => inkWorldToLocal(ink, tile));
+    if (!fillData) return "";
+    if (!boundaryIds.length && !fill.usesTileBoundary) return "";
+    const boundaryInk = fillBoundaryInkList(design, boundaryIds).map((ink) => inkWorldToLocal(ink, tile));
     const primitives = [];
     for (const ink of boundaryInk) {
       if (ink.type === "line") {
@@ -4592,7 +4869,7 @@ export function mountDesigner(root) {
     const fallbackH = Math.max(64, Math.round(state.vh / Math.max(1, state.dpr)));
     const width = parseExportDimension(exportWidthInput.value, fallbackW);
     const height = parseExportDimension(exportHeightInput.value, fallbackH);
-    if (width * height > 96000000) {
+    if (width * height > EXPORT_MAX_PIXELS) {
       window.alert("Export size is too large. Please choose a smaller width/height.");
       return;
     }
@@ -4610,9 +4887,14 @@ export function mountDesigner(root) {
     exportCtx.fillRect(0, 0, width, height);
 
     const exportTiles = state.primaryTiles.map((tile) =>
-      buildPrimaryTile(tile.id, tile.shape, tile.side / Math.max(1, state.dpr), v(width * 0.5, height * 0.5))
+      buildPrimaryTile(
+        tile.id,
+        tile.shape,
+        tile.side / Math.max(1, state.dpr),
+        v(width * 0.5, height * 0.5)
+      )
     );
-    renderBackgroundTiling(exportCtx, width, height, exportTiles, 1, false, true);
+    renderBackgroundTiling(exportCtx, width, height, exportTiles, 1, false, true, "vector");
     triggerPngDownload(exportCanvas, width, height);
     closeExportDialog();
   }
